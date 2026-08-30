@@ -240,7 +240,7 @@ async function checkResources(apiKey) {
 
 // ── 主流程 ───────────────────────────────────────────────
 (async () => {
-  console.log(C.cyan(C.bold('🩺 AI剪口播 · 环境自检')) + C.dim(`  (${process.platform})`));
+  console.log(C.cyan(C.bold('🩺 speech-roughcut · 环境自检')) + C.dim(`  (${process.platform})`));
 
   fixShebangs();
   const missingDeps = checkDeps();

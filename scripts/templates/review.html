@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>剪口播 · 审核稿</title>
+  <title>speech-roughcut · 审核稿</title>
   <script src="/lib/compute_keeps.js"></script>
+  <script src="/lib/selection_segments.js"></script>
+  <script src="/lib/subtitle_blocks.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Anton&family=Noto+Sans+SC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -108,6 +110,18 @@
     .tb-left   { display: flex; align-items: center; gap: 16px; }
     .tb-center { display: flex; align-items: center; gap: 8px; padding: 6px; background: var(--ink); border: 1px solid var(--line); border-radius: var(--r-pill); }
     .tb-right  { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+    .title-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--paper-300);
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .title-toggle input { accent-color: var(--signal); cursor: pointer; }
 
     .brand {
       display: inline-flex;
@@ -792,7 +806,7 @@
   <div class="topbar">
     <div class="tb-left">
       <div class="brand">
-        <svg class="brand-mark" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="剪口播">
+        <svg class="brand-mark" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="speech-roughcut">
           <rect width="36" height="36" rx="9" fill="#F2EBDD"/>
           <g fill="#2540FF">
             <rect x="6"    y="14"   width="3" height="8"  rx="1.5"/>
@@ -831,6 +845,10 @@
       <span class="time-display"><span id="timeCur">00:00</span><span class="sep">/</span><span id="timeTot">00:00</span></span>
     </div>
     <div class="tb-right">
+      <label class="title-toggle" title="导入 Final Cut Pro 后可逐块改字、改样式和调整时间">
+        <input type="checkbox" id="includeTitles" checked>
+        可编辑标题字幕
+      </label>
       <button class="primary" onclick="exportFCPXML()">导出 FCPXML</button>
       <div class="tb-sep"></div>
       <button class="danger" onclick="clearAll()" title="清空选择">清空</button>
@@ -1098,7 +1116,12 @@
       function recompute() {
         deleteSegs = getDeleteSegments();
         if (typeof ComputeKeeps !== 'undefined') {
-          const keeps = ComputeKeeps.computeFinalKeeps(deleteSegs, silencePeriods, duration, cutOpts);
+          const keeps = ComputeKeeps.computeFinalKeeps(
+            deleteSegs,
+            silencePeriods,
+            duration,
+            getProtectedCutOpts(),
+          );
           const cuts = ComputeKeeps.keepsToCuts(keeps, duration);
           extraCuts = ComputeKeeps.intervalSubtract(cuts, deleteSegs); // 用户没选、却被算法切掉的部分
           // 状态栏：总时长 / 剪后
@@ -1393,6 +1416,12 @@
     let cachedPlaybackCuts = [];
     let playbackCutsDirty = true;
     function markSegsDirty() { segsDirty = true; playbackCutsDirty = true; if (typeof wave !== 'undefined') wave.markDirty(); }
+    function getProtectedCutOpts() {
+      const selectedIndices = new Set([...selected].map(id => parseInt(id.replace('word-', ''), 10)));
+      const protectedIndices = words.map((_, index) => index).filter(index => !selectedIndices.has(index));
+      const protectedSegments = SelectionSegments.selectedIndicesToSegments(words, protectedIndices);
+      return Object.assign({}, cutOpts, { protectedSegments });
+    }
     function getPlaybackCuts() {
       if (!playbackCutsDirty) return cachedPlaybackCuts;
       const del = getDeleteSegments();
@@ -1401,35 +1430,22 @@
         // 算法未就绪或时长未知：退回原始选段，且不缓存（保持 dirty，等就绪后重算）
         return del;
       }
-      const keeps = ComputeKeeps.computeFinalKeeps(del, silencePeriods, dur, cutOpts);
+      const keeps = ComputeKeeps.computeFinalKeeps(
+        del,
+        silencePeriods,
+        dur,
+        getProtectedCutOpts(),
+      );
       cachedPlaybackCuts = ComputeKeeps.keepsToCuts(keeps, dur);
       playbackCutsDirty = false;
       return cachedPlaybackCuts;
     }
     function getDeleteSegments() {
       if (!segsDirty) return cachedDeleteSegs;
-      // 按词序扫一遍，把「连续删除」连成整刀：两个选中词之间只要没夹着「你保留的真词」
-      // （中间只有静音段 isGap 或字间时间戳零头），就贯穿成一刀，吞掉中间的缝——
-      // 避免连续删除里残留没字可点的声音/空隙（旧版用固定 0.15s 阈值会漏掉 >0.15s 的缝）。
-      // 一旦夹着你保留的真词，才断开成两段，绝不误删要留的内容。
-      const out = [];
-      let cur = null;          // 当前正在累积的删除段
-      let sawKeptWord = false;  // 自上一个选中词以来，中间是否夹了「保留的真词」
-      for (let i = 0; i < words.length; i++) {
-        const w = words[i];
-        if (selected.has('word-' + i)) {
-          if (cur && !sawKeptWord) cur.end = w.end;            // 只隔静音/零头 → 连成一刀
-          else { if (cur) out.push(cur); cur = { start: w.start, end: w.end }; }
-          sawKeptWord = false;
-        } else if (!w.isGap) {
-          sawKeptWord = true;   // 保留的真词 → 会切断删除段，不能被吞
-        }
-        // 未选中的 isGap（静音/缝）：不切断 run，留给下一个选中词决定是否吞
-      }
-      if (cur) out.push(cur);
-      cachedDeleteSegs = out;
+      const selectedIndices = [...selected].map(id => parseInt(id.replace('word-', ''), 10));
+      cachedDeleteSegs = SelectionSegments.selectedIndicesToSegments(words, selectedIndices);
       segsDirty = false;
-      return out;
+      return cachedDeleteSegs;
     }
 
     // === 当前词二分查找（按 start 升序，跳过 isGap=false 的 word 时间轴用全数组即可）===
@@ -1465,24 +1481,9 @@
       if (cur) gapGroups.push(cur);
     }
 
-    // 段落切分：长静音（≥0.4s）作为段落分界
+    // 段落切分规则与后端 FCP Title 共用 scripts/lib/subtitle_blocks.js。
     function buildParagraphs() {
-      const PARA_THRESHOLD = 0.4;
-      const paras = [];
-      let cur = { startTime: 0, items: [] };
-      let firstWord = true;
-      words.forEach((w, idx) => {
-        if (w.isGap && (w.end - w.start) >= PARA_THRESHOLD && cur.items.length > 0) {
-          cur.items.push({ word: w, idx });
-          paras.push(cur);
-          cur = { startTime: w.end, items: [] };
-        } else {
-          if (firstWord && !w.isGap) { cur.startTime = w.start; firstWord = false; }
-          cur.items.push({ word: w, idx });
-        }
-      });
-      if (cur.items.length) paras.push(cur);
-      return paras;
+      return SubtitleBlocks.buildParagraphs(words);
     }
 
     function render() {
@@ -1856,6 +1857,7 @@
     async function exportFCPXML() {
       const segments = getDeleteSegments();
       if (!segments.length) { alert('没有选中任何片段'); return; }
+      const includeTitles = document.getElementById('includeTitles').checked;
       // 把「你最终选中的词级 idx」一并送给服务器，供自进化学习写 review_log.json。
       // selected 里是 'word-<idx>'，提取数字、升序；服务器再 diff AI 初选 vs 你最终。
       const finalSelected = [...selected]
@@ -1866,7 +1868,7 @@
         const res = await fetch('/api/fcpxml', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ deleteList: segments, opts: cutOpts, finalSelected })
+          body: JSON.stringify({ deleteList: segments, opts: cutOpts, finalSelected, includeTitles })
         });
         const data = await res.json();
         if (data.success) {
@@ -1879,7 +1881,8 @@
           a.download = fileName;
           a.click();
           URL.revokeObjectURL(url);
-          alert(`✅ FCPXML 已导出\n\n📁 文件: ${fileName}\n🎬 保留片段: ${data.segments} 个\n\n直接拖入 Final Cut Pro 即可`);
+          const titleNote = includeTitles ? '\n🔤 已包含可编辑标题字幕' : '';
+          alert(`✅ FCPXML 已导出\n\n📁 文件: ${fileName}\n🎬 保留片段: ${data.segments} 个${titleNote}\n\n直接拖入 Final Cut Pro 即可`);
         } else {
           alert('❌ 导出失败: ' + data.error);
         }

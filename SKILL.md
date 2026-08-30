@@ -1,9 +1,9 @@
 ---
-name: AI剪口播
-description: 口播视频转录和口误识别。生成审查稿和删除任务清单。触发词：剪口播、处理视频、识别口误
+name: speech-roughcut
+description: 口播视频或音频转录和口误识别。生成审查稿和删除任务清单。触发词：剪口播、处理视频、处理音频、识别口误
 ---
 
-# 剪口播 
+# speech-roughcut
 
 > 火山引擎转录 + AI 口误识别 + 网页审核 / 字幕格式化
 
@@ -16,20 +16,22 @@ description: 口播视频转录和口误识别。生成审查稿和删除任务�
 
 **模式 A（剪口播）：**
 ```
-output/YYYY-MM-DD_HH-MM_视频名/剪口播/
-├── 1_转录/   audio.mp3 · volcengine_v3_result.json · subtitles_words.json
+output/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
+├── 1_转录/   media_manifest.json · volcengine_v3_result.json · subtitles_words.json
+│              audio.mp3（仅视频或非直通格式生成分析代理时存在）
 ├── 2_分析/   analysis.txt · sentence_map.json · speech_errors.json · auto_selected.json
-└── 3_审核/   review.html · audio.mp3 · data.json · silence_periods.json
-                <视频名>_cut.fcpxml   ← 网页点击「导出 FCPXML」后生成在此目录
+└── 3_审核/   review.html · media_manifest.json · data.json · peaks.json · silence_periods.json
+                <媒体名>_cut.fcpxml   ← 网页点击「导出 FCPXML」后生成在此目录
                                        拖入剪映 / Final Cut Pro 完成最终剪辑
 ```
 
 **模式 B（转字幕）：**
 ```
-output/YYYY-MM-DD_HH-MM_视频名/剪口播/
-├── 1_转录/   audio.mp3 · volcengine_v3_result.json · subtitles_words.json · raw_text.txt
+output/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
+├── 1_转录/   media_manifest.json · volcengine_v3_result.json · subtitles_words.json · raw_text.txt
+│              audio.mp3（仅视频或非直通格式生成分析代理时存在）
 └── 2_纠错/   corrected.txt · uncertain.md（可选）
-视频所在目录/
+媒体所在目录/
 └── subtitles_formatted.md   ← 最终输出
 ```
 
@@ -37,7 +39,7 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 
 ```
 -1. 首次引导（仅第一次：环境自检 + 配置火山引擎）
-0. 确认视频路径 + 选择模式
+0. 确认媒体路径 + 选择模式
 1-4. run_transcribe.sh（自动，两模式共用）
 
 模式 A（剪口播）:
@@ -49,6 +51,7 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
   5.6 merge_selections.js
   6-7. 生成审核网页 + 启动服务器
   【等待用户确认】→ 网页点击「导出 FCPXML」→ 拖入剪映 / Final Cut Pro 完成剪辑
+       （默认勾选「可编辑标题字幕」，导出时同步生成 Final Cut Pro Title）
        （导出同时写 3_审核/review_log.json，供步骤 8 学习）
   8. 自进化学习（用户显式触发「已导出，学一下」）→ diff 抽规则 → 确认 → 写 经验规则.md
 
@@ -64,7 +67,7 @@ output/YYYY-MM-DD_HH-MM_视频名/剪口播/
 > 下面命令里的 `SKILL_DIR` 一律指**本 skill 的安装目录**（即你加载本 `SKILL.md` 的那个目录，
 > 含 `scripts/`、`用户习惯/`）。执行前把它设成你实际加载 skill 的绝对路径即可：
 > ```bash
-> SKILL_DIR="<本 skill 的安装目录>"   # 例：Claude Code 默认 ~/.claude/skills/AI剪口播
+> SKILL_DIR="<本 skill 的安装目录>"   # 例：Claude Code 默认 ~/.claude/skills/speech-roughcut
 > ```
 > API Key 的查找顺序见 [scripts/lib/load_api_key.sh](scripts/lib/load_api_key.sh)：
 > 环境变量 `VOLCENGINE_API_KEY` → `$SKILL_DIR/.env` →（兼容旧约定）上一级 `.env`。
@@ -102,13 +105,13 @@ node "$SKILL_DIR/scripts/doctor.js"
 
 > 全程不要替用户去控制台点按钮或粘贴他的私有 key 到别处；只给清晰可复制的命令和链接。
 
-### 步骤 0: 确认视频路径 + 选择模式
+### 步骤 0: 确认媒体路径 + 选择模式
 
-收到视频路径后，**先展示确认**，格式：
+收到视频或音频路径后，**先展示确认**，格式：
 
 ```
-📹 视频：/path/to/视频.mp4
-📁 输出：~/Desktop/output/YYYY-MM-DD_HH-MM_视频名/剪口播/
+🎙️ 媒体：/path/to/口播.wav
+📁 输出：~/Desktop/output/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
 
 请选择模式：
   [A] 剪口播 — 识别口误 → 网页审核 → 导出 FCPXML 给剪映 / FCP
@@ -121,11 +124,17 @@ node "$SKILL_DIR/scripts/doctor.js"
 
 ```bash
 SKILL_DIR="<本 skill 的安装目录>"   # 见上方「路径约定」
-VIDEO_PATH="/path/to/视频.mp4"
-BASE_DIR="$HOME/Desktop/output/$(date +%Y-%m-%d_%H-%M)_$(basename "$VIDEO_PATH" | sed 's/\.[^.]*$//')/剪口播"
+MEDIA_PATH="/path/to/视频或音频"
+BASE_DIR="$HOME/Desktop/output/$(date +%Y-%m-%d_%H-%M)_$(basename "$MEDIA_PATH" | sed 's/\.[^.]*$//')/speech-roughcut"
 
-bash "$SKILL_DIR/scripts/run_transcribe.sh" "$VIDEO_PATH" "$BASE_DIR"
-# 输出: BASE_DIR/1_转录/{audio.mp3, volcengine_v3_result.json, subtitles_words.json}
+bash "$SKILL_DIR/scripts/run_transcribe.sh" "$MEDIA_PATH" "$BASE_DIR"
+# 输出: BASE_DIR/1_转录/{media_manifest.json, volcengine_v3_result.json, subtitles_words.json}
+# MP3 / M4A / WAV 纯音频直接使用原文件，不重新编码，也不生成 audio.mp3；
+# 视频或其他格式沿用分析代理，额外生成 BASE_DIR/1_转录/audio.mp3。
+# M4A 在 --auto 下固定使用支持该格式的标准版；显式 --flash 会报格式不兼容，
+# 不会为了迁就极速版而偷偷转码。
+# MP3 / WAV 若超过极速版的 2 小时或 100MB 上限，--auto 同样改走标准版；
+# 标准版超过 5 小时或 512MB 时会在上传前终止并说明原因。
 #
 # 默认引擎: auto 轮流（flash 极速版 auc_turbo ↔ 标准版 auc 交替）
 #   - 每次转录自动切换引擎，分摊两份各 20h 免费额度 ≈ 共 40h
@@ -235,7 +244,7 @@ node "$SKILL_DIR/scripts/merge_selections.js" \
 node "$SKILL_DIR/scripts/generate_review.js" \
   "$BASE_DIR/1_转录/subtitles_words.json" \
   "$BASE_DIR/2_分析/auto_selected.json" \
-  "$BASE_DIR/1_转录/audio.mp3" \
+  "$BASE_DIR/1_转录/media_manifest.json" \
   "$BASE_DIR/3_审核"
 
 # 7. 启动审核服务器
@@ -243,7 +252,7 @@ node "$SKILL_DIR/scripts/generate_review.js" \
 #    健康检查、打开浏览器；若环境禁止开新窗口，会打印一条手动命令兜底。
 #    （不要再用 `&` / nohup 在 agent 后台挂服务——见下方「为什么」。）
 bash "$SKILL_DIR/scripts/serve_review.sh" \
-  "$BASE_DIR/3_审核" "$VIDEO_PATH" "$SKILL_DIR/scripts/review_server.js"
+  "$BASE_DIR/3_审核" "$BASE_DIR/3_审核/media_manifest.json" "$SKILL_DIR/scripts/review_server.js"
 ```
 
 > **⚠️ 为什么必须用 `serve_review.sh`，不能直接后台 `&`/nohup 挂服务（重要，否则用户会「拒绝连接」）：**
@@ -261,6 +270,8 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 
 用户在网页中：播放片段确认 → 勾选/取消 → 点击「导出 FCPXML」→ 生成的 `*_cut.fcpxml` 拖入剪映或 Final Cut Pro 完成最终剪辑。
 
+「可编辑标题字幕」默认勾选。开启时，服务器在导出阶段把已完成的字级转写转换成 Final Cut Pro 的 Basic Title：删除的词不进入字幕，字幕块不跨越剪辑断点；工作台已有短行保持不动，仅对超过 14 个中文字视觉宽度的长行拆分（ASCII 字符按半个中文字计宽，英文单词不从中间拆开）。关闭时不写 Title，保持原来的纯媒体 FCPXML 输出。
+
 > **导出时服务器同时写一份 `3_审核/review_log.json`**（与 FCPXML 同一次点击产出）：记录
 > AI 初选 idx、用户最终 idx、切割参数，以及二者**词级 diff**（带文字+句子上下文）。
 > 这是步骤 8「自进化学习」的唯一原料，**不读 `.fcpxml`**（那是算完的时间线，丢失了词级选择）。
@@ -270,8 +281,8 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 > **不自动跑。** 用户导出后，在**任意会话**说「<项目> 已导出，学一下」之类，才执行本步。
 > 本步只读文件、不依赖对话上下文还在，所以冷会话也能跑。
 
-1. **定位日志**：单个项目读 `<project>/剪口播/3_审核/review_log.json`；
-   批量重学则 glob `~/Desktop/output/*/剪口播/3_审核/review_log.json`，逐个汇总。
+1. **定位日志**：单个项目读 `<project>/speech-roughcut/3_审核/review_log.json`；
+   批量重学则 glob `~/Desktop/output/*/speech-roughcut/3_审核/review_log.json`，逐个汇总。
    （日志只存在项目里，清理 output 会丢语料。）
 2. **读现有规则**：先读 `用户习惯/经验规则.md` **全文** + `用户习惯/规则.md`，避免重复提已有规则。
 3. **看 diff 抽规则**：对每条 `diff.aiOnly`（AI 想删你留回，可能过删）和 `diff.userOnly`
@@ -326,4 +337,3 @@ VOLCENGINE_API_KEY=your_api_key_here
 去[新版控制台](https://console.volcengine.com/speech/new/overview)生成 **一个** API Key 即可——所有引擎共用这同一个 `VOLCENGINE_API_KEY`（均为新版控制台单 `X-Api-Key` 认证）。
 
 默认 `auto` 轮流模式会交替用极速版和标准版，**需同时开通两个资源**：「录音文件识别 - 极速版」（`volc.bigasr.auc_turbo`）+「录音文件识别 - 标准版」（`volc.bigasr.auc`）。两者各有 20h 免费额度、各自独立抵扣，轮流即可吃满 ≈40h。若只想/只开通了其中一个资源，加 `--flash` 或 `--v3-standard` 固定使用。
-

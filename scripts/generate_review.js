@@ -2,21 +2,22 @@
 /**
  * 生成审核数据文件 + 复制前端模板
  *
- * 用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <audio_file> [输出目录]
- * 输出: data.json + review.html (from templates/) + audio.mp3
+ * 用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <media_manifest.json> [输出目录]
+ * 输出: data.json + review.html + media_manifest.json + 波形/静音分析数据
  */
 
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
+const { loadAndVerifyManifest } = require('./lib/media_manifest');
 
 const subtitlesFile = process.argv[2];
 const autoSelectedFile = process.argv[3];
-const audioFile = process.argv[4];
+const manifestFile = process.argv[4];
 const outDir = process.argv[5] || '.';
 
-if (!subtitlesFile || !autoSelectedFile || !audioFile) {
-  console.error('用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <audio_file> [输出目录]');
+if (!subtitlesFile || !autoSelectedFile || !manifestFile) {
+  console.error('用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <media_manifest.json> [输出目录]');
   process.exit(1);
 }
 
@@ -55,16 +56,20 @@ const data = {
 fs.writeFileSync(path.join(outDir, 'data.json'), JSON.stringify(data, null, 2));
 console.log('已生成 data.json');
 
-// ── 复制音频文件 ──────────────────────────────────────────
-const audioDst = path.join(outDir, 'audio.mp3');
-if (audioFile !== audioDst && fs.existsSync(audioFile)) {
-  fs.copyFileSync(audioFile, audioDst);
-  console.log('已复制音频: audio.mp3');
-} else if (audioFile === audioDst && fs.existsSync(audioFile)) {
-  console.log('音频已是 audio.mp3');
-} else {
-  console.warn('⚠️  音频文件不存在: ' + audioFile);
+// ── 媒体单一来源 ──────────────────────────────────────────
+// 审核目录只复制很小的权威清单，不复制或重新编码媒体本身。兼容音频模式下，
+// 转写、波形、静音、播放和导出最终都指向用户提交的同一个原文件。
+let mediaManifest;
+try {
+  mediaManifest = loadAndVerifyManifest(manifestFile);
+} catch (error) {
+  console.error('❌ 媒体清单无效: ' + error.message);
+  process.exit(1);
 }
+const analysisMedia = mediaManifest.analysisPath;
+const reviewManifest = path.join(outDir, 'media_manifest.json');
+fs.copyFileSync(path.resolve(manifestFile), reviewManifest);
+console.log('已生成 media_manifest.json（媒体不复制）');
 
 // ── 复制前端模板 ──────────────────────────────────────────
 const templateSrc = path.join(__dirname, 'templates', 'review.html');
@@ -88,7 +93,7 @@ const silenceOut = path.join(outDir, 'silence_periods.json');
 let audioDuration = 0;
 try {
   audioDuration = parseFloat(
-    execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "file:${audioDst}"`).toString().trim()
+    execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "file:${analysisMedia}"`).toString().trim()
   ) || 0;
 } catch (e) {
   console.warn('⚠️  ffprobe 读取音频时长失败: ' + e.message);
@@ -97,7 +102,7 @@ try {
 try {
   // 取峰值音量，自适应计算静音阈值（峰值不受停顿多少影响，比均值更稳定）
   const volRaw = execSync(
-    `ffmpeg -i "${audioDst}" -af volumedetect -f null - 2>&1`
+    `ffmpeg -i "${analysisMedia}" -af volumedetect -f null - 2>&1`
   ).toString();
   const maxMatch = volRaw.match(/max_volume:\s*([-\d.]+)\s*dB/);
   let SILENCE_DB = -35; // 默认兜底
@@ -110,7 +115,7 @@ try {
   }
 
   const raw = execSync(
-    `ffmpeg -i "${audioDst}" -af silencedetect=noise=${SILENCE_DB.toFixed(1)}dB:d=${SILENCE_MIN_DUR} -f null - 2>&1`
+    `ffmpeg -i "${analysisMedia}" -af silencedetect=noise=${SILENCE_DB.toFixed(1)}dB:d=${SILENCE_MIN_DUR} -f null - 2>&1`
   ).toString();
   const ss = [...raw.matchAll(/silence_start: ([\d.]+)/g)];
   const se = [...raw.matchAll(/silence_end: ([\d.]+)/g)];
@@ -125,7 +130,7 @@ try {
   let finalSilence = periods;
   try {
     const { reclaim } = require('./lib/refine_boundaries');
-    const r = reclaim({ audioFile: audioDst, words, baseSilence: periods });
+    const r = reclaim({ audioFile: analysisMedia, words, baseSilence: periods });
     finalSilence = r.merged;
     console.log('🎯 能量回收: 新挖出 ' + r.reclaimedCount + ' 段句尾换气/静音');
   } catch (e) {
@@ -148,7 +153,7 @@ try {
   // 目标采样点：约 150 点/秒，封顶 60000。点更密 → 放大时波形有真实细节、不阶梯，
   // 渲染端再做插值+平滑画成填充包络（贴近剪映/FCP）。60000 浮点 ≈ 300KB，长视频内存仍可控。
   const pointsTarget = Math.min(60000, Math.max(2000, Math.round(audioDuration * 150)));
-  const pcm = execSync(`ffmpeg -i "${audioDst}" -ac 1 -ar ${SR} -f s16le -`, { maxBuffer: 1 << 28 });
+  const pcm = execSync(`ffmpeg -v error -i "${analysisMedia}" -ac 1 -ar ${SR} -f s16le -`, { maxBuffer: 1 << 28 });
   const sampleCount = Math.floor(pcm.length / 2);
   const bucket = Math.max(1, Math.ceil(sampleCount / pointsTarget));
   const peaks = [];

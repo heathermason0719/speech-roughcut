@@ -3,33 +3,48 @@
  * 审核服务器
  *
  * 功能：
- * 1. 提供静态文件服务（review.html, audio.mp3）
+ * 1. 提供静态文件服务（review.html + manifest 指向的播放媒体）
  * 2. POST /api/fcpxml - 接收删除列表，导出 FCPXML 工程文件（可导入剪映 / Final Cut Pro）
  *
- * 用法: node review_server.js [port] [video_file]
- * 必须: video_file（无默认值，会检查文件是否存在）
+ * 用法: node review_server.js [port] [media_manifest_or_file]
+ * 推荐: media_manifest.json；直接媒体路径仅保留给旧审核目录兼容使用。
  */
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { buildFcpxml } = require('./lib/fcpxml');
+const { loadAndVerifyManifest } = require('./lib/media_manifest');
 
 const PORT = process.argv[2] || 8899;
-const VIDEO_FILE = process.argv[3];
+const MEDIA_INPUT = process.argv[3];
 
-if (!VIDEO_FILE) {
-  console.error('❌ 错误: 必须指定视频文件路径');
-  console.error('用法: node review_server.js [port] [video_file]');
+if (!MEDIA_INPUT) {
+  console.error('❌ 错误: 必须指定媒体清单或媒体文件路径');
+  console.error('用法: node review_server.js [port] [media_manifest_or_file]');
   process.exit(1);
 }
 
-if (!fs.existsSync(VIDEO_FILE)) {
-  console.error(`❌ 错误: 视频文件不存在: ${VIDEO_FILE}`);
+if (!fs.existsSync(MEDIA_INPUT)) {
+  console.error(`❌ 错误: 媒体清单或文件不存在: ${MEDIA_INPUT}`);
   process.exit(1);
 }
 
-// 静音边界，由 generate_review.js 预计算（对 audio.mp3 跑 silencedetect，自适应阈值 = 峰值 - 35dB）
+// 新流程由 media_manifest.json 明确区分播放和 FCPXML 源资产；旧审核目录仍可
+// 直接传媒体文件启动，避免已有项目突然失效。
+let mediaManifest = null;
+if (path.extname(MEDIA_INPUT).toLowerCase() === '.json') {
+  try {
+    mediaManifest = loadAndVerifyManifest(MEDIA_INPUT);
+  } catch (error) {
+    console.error(`❌ 错误: 媒体清单校验失败: ${error.message}`);
+    process.exit(1);
+  }
+}
+const PLAYBACK_FILE = mediaManifest ? mediaManifest.playbackPath : MEDIA_INPUT;
+const EXPORT_FILE = mediaManifest ? mediaManifest.exportPath : MEDIA_INPUT;
+
+// 静音边界，由 generate_review.js 对 manifest.analysisPath 预计算。
 // 切割算法本身在 lib/compute_keeps.js（前后端共用，单一来源）
 let silencePeriods = [];
 try {
@@ -58,7 +73,14 @@ const MIME_TYPES = {
   '.css': 'text/css',
   '.json': 'application/json',
   '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
   '.mp4': 'video/mp4',
+  '.m4v': 'video/x-m4v',
+  '.mov': 'video/quicktime',
 };
 
 const server = http.createServer((req, res) => {
@@ -73,9 +95,15 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 共享切割算法模块：从 scripts/lib 单一来源直供前端，避免拷贝漂移
-  if (req.method === 'GET' && req.url.split('?')[0] === '/lib/compute_keeps.js') {
-    const libPath = path.join(__dirname, 'lib', 'compute_keeps.js');
+  // 共享算法模块：从 scripts/lib 单一来源直供前端，避免切割/分行规则拷贝漂移。
+  const requestPath = req.url.split('?')[0];
+  const sharedLibs = new Map([
+    ['/lib/compute_keeps.js', 'compute_keeps.js'],
+    ['/lib/selection_segments.js', 'selection_segments.js'],
+    ['/lib/subtitle_blocks.js', 'subtitle_blocks.js'],
+  ]);
+  if (req.method === 'GET' && sharedLibs.has(requestPath)) {
+    const libPath = path.join(__dirname, 'lib', sharedLibs.get(requestPath));
     if (fs.existsSync(libPath)) {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
       fs.createReadStream(libPath).pipe(res);
@@ -86,16 +114,16 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 视频文件代理（原始视频不在当前目录时使用）
+  // 媒体文件代理（保留 /video URL，避免旧审核页失效）
   if (req.method === 'GET' && req.url.startsWith('/video')) {
-    if (!VIDEO_FILE || !fs.existsSync(VIDEO_FILE)) {
+    if (!PLAYBACK_FILE || !fs.existsSync(PLAYBACK_FILE)) {
       res.writeHead(404);
-      res.end('Video not found');
+      res.end('Media not found');
       return;
     }
-    const stat = fs.statSync(VIDEO_FILE);
-    const ext = path.extname(VIDEO_FILE).toLowerCase();
-    const contentType = ext === '.mp4' ? 'video/mp4' : ext === '.mov' ? 'video/quicktime' : 'video/mp4';
+    const stat = fs.statSync(PLAYBACK_FILE);
+    const ext = path.extname(PLAYBACK_FILE).toLowerCase();
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
 
     if (req.headers.range) {
       const range = req.headers.range.replace('bytes=', '').split('-');
@@ -107,14 +135,14 @@ const server = http.createServer((req, res) => {
         'Accept-Ranges': 'bytes',
         'Content-Length': end - start + 1,
       });
-      fs.createReadStream(VIDEO_FILE, { start, end }).pipe(res);
+      fs.createReadStream(PLAYBACK_FILE, { start, end }).pipe(res);
     } else {
       res.writeHead(200, {
         'Content-Type': contentType,
         'Content-Length': stat.size,
         'Accept-Ranges': 'bytes',
       });
-      fs.createReadStream(VIDEO_FILE).pipe(res);
+      fs.createReadStream(PLAYBACK_FILE).pipe(res);
     }
     return;
   }
@@ -130,13 +158,17 @@ const server = http.createServer((req, res) => {
         const deleteList = Array.isArray(parsed) ? parsed : (parsed.deleteList || []);
         const cutOpts = (parsed && !Array.isArray(parsed) && parsed.opts) ? parsed.opts : undefined;
         const finalSelected = (parsed && !Array.isArray(parsed) && Array.isArray(parsed.finalSelected)) ? parsed.finalSelected : null;
+        const includeTitles = !!(parsed && !Array.isArray(parsed) && parsed.includeTitles === true);
 
         // FCPXML 生成（含 ffprobe 探测 + 切割算法）抽到 lib/fcpxml.js，便于单测
         const { xml, outputPath: outputFcpxml, finalKeeps, baseName } = buildFcpxml({
-          videoFile: VIDEO_FILE,
+          mediaFile: EXPORT_FILE,
           deleteList,
           silencePeriods,
           cutOpts,
+          includeTitles,
+          subtitleWords: reviewWords,
+          selectedIndices: finalSelected || [],
         });
 
         fs.writeFileSync(outputFcpxml, xml);
@@ -276,7 +308,7 @@ const server = http.createServer((req, res) => {
   fs.createReadStream(filePath).pipe(res);
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '127.0.0.1', () => {
   // 落地两个文件到当前目录（3_审核/），让 agent / 用户随时能找到地址并重启：
   //   server_url.txt      — 浏览器要打开的地址
   //   .review_server.pid  — 进程号，用于停止/排障（kill $(cat .review_server.pid)）
@@ -291,7 +323,8 @@ server.listen(PORT, () => {
   console.log(`
 🎬 审核服务器已启动
 📍 地址: http://localhost:${PORT}
-📹 视频: ${VIDEO_FILE}
+🎙️ 播放媒体: ${PLAYBACK_FILE}
+📎 导出源资产: ${EXPORT_FILE}
 
 操作说明:
 1. 在网页中审核 AI 预选的删除片段

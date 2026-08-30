@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # 步骤 0-4 自动化流水线
-# 用法: ./run_transcribe.sh <video.mp4> [base_output_dir] [--engine]
+# 用法: ./run_transcribe.sh <media_file> [base_output_dir] [--engine]
 #
 # 引擎选项（默认 auto 轮流）:
 #   （无）/--auto 每次在 flash / 标准版 间交替，分摊两份各 20h 免费额度 ≈ 共 40h
@@ -10,14 +10,15 @@
 #   --v3-standard 只用标准版 auc（异步 submit/query 轮询）
 #
 # 输出: base_output_dir/1_转录/
-#   ├── audio.mp3
+#   ├── media_manifest.json
 #   ├── volcengine_v3_result.json
-#   └── subtitles_words.json
+#   ├── subtitles_words.json
+#   └── audio.mp3（仅视频或非直通格式需要分析代理时生成）
 #
 
 set -e
 
-VIDEO_PATH="$1"
+MEDIA_PATH="$1"
 BASE_DIR="${2:-.}"
 ENGINE="auto"  # 默认 flash / 标准版 轮流，吃满两份免费额度
 
@@ -29,14 +30,15 @@ for arg in "$@"; do
     --auto)        ENGINE="auto" ;;
   esac
 done
+REQUESTED_ENGINE="$ENGINE"
 
-if [ -z "$VIDEO_PATH" ]; then
-  echo "用法: $0 <video.mp4> [base_output_dir] [--flash|--v3-standard]"
+if [ -z "$MEDIA_PATH" ]; then
+  echo "用法: $0 <media_file> [base_output_dir] [--flash|--v3-standard]"
   exit 1
 fi
 
-if [ ! -f "$VIDEO_PATH" ]; then
-  echo "❌ 视频文件不存在: $VIDEO_PATH"
+if [ ! -f "$MEDIA_PATH" ]; then
+  echo "❌ 媒体文件不存在: $MEDIA_PATH"
   exit 1
 fi
 
@@ -69,21 +71,30 @@ fi
 TRANSCRIBE_DIR="$BASE_DIR/1_转录"
 mkdir -p "$TRANSCRIBE_DIR"
 
-# ── 步骤 1: 提取音频 ────────────────────────────────────
-echo "📦 步骤1: 提取音频..."
-ffmpeg -i "file:$VIDEO_PATH" -vn -acodec libmp3lame -y "$TRANSCRIBE_DIR/audio.mp3" 2>/dev/null
-echo "✅ 音频已保存: $TRANSCRIBE_DIR/audio.mp3"
+# ── 步骤 1: 建立媒体单一来源 ─────────────────────────────
+# mp3 / m4a / wav 纯音频直接使用原文件；视频或其他格式维持旧行为，生成一个分析代理。
+echo "📦 步骤1: 检查媒体..."
+ANALYSIS_MEDIA=$(node "$SKILL_DIR/scripts/prepare_media.js" "$MEDIA_PATH" "$TRANSCRIBE_DIR")
+echo "✅ 分析媒体: $ANALYSIS_MEDIA"
+
+# 极速版官方格式列表不含 M4A；auto 模式遇到 M4A 时改走支持它的标准版。
+# 用户显式指定 --flash 时不静默改变选择，由兼容检查给出明确错误。
+COMPAT_ENGINE=$(node "$SKILL_DIR/scripts/select_transcribe_engine.js" "$REQUESTED_ENGINE" "$ENGINE" "$ANALYSIS_MEDIA")
+if [ "$COMPAT_ENGINE" != "$ENGINE" ]; then
+  echo "🔀 M4A 直通需要标准版，本次从 $ENGINE 切换为 $COMPAT_ENGINE"
+fi
+ENGINE="$COMPAT_ENGINE"
 
 # ── 步骤 2+3: 转录 ─────────────────────────────────────
 echo "🚀 步骤2+3: 转录（引擎: $ENGINE）..."
 
 case "$ENGINE" in
   flash)
-    bash "$SKILL_DIR/scripts/volcengine_flash_transcribe.sh" "$TRANSCRIBE_DIR/audio.mp3" "$TRANSCRIBE_DIR"
+    bash "$SKILL_DIR/scripts/volcengine_flash_transcribe.sh" "$ANALYSIS_MEDIA" "$TRANSCRIBE_DIR"
     RESULT_FILE="$TRANSCRIBE_DIR/volcengine_v3_result.json"
     ;;
   v3-standard)
-    bash "$SKILL_DIR/scripts/volcengine_v3_transcribe.sh" "$TRANSCRIBE_DIR/audio.mp3" "$TRANSCRIBE_DIR"
+    bash "$SKILL_DIR/scripts/volcengine_v3_transcribe.sh" "$ANALYSIS_MEDIA" "$TRANSCRIBE_DIR"
     RESULT_FILE="$TRANSCRIBE_DIR/volcengine_v3_result.json"
     ;;
   *)
@@ -107,4 +118,4 @@ node "$SKILL_DIR/scripts/generate_subtitles.js" \
 echo ""
 echo "🎉 流水线完成！"
 echo "   输出目录: $TRANSCRIBE_DIR"
-ls -lh "$TRANSCRIBE_DIR"/*.mp3 "$TRANSCRIBE_DIR"/*.json 2>/dev/null | awk '{print "     "$9"  "$5}'
+find "$TRANSCRIBE_DIR" -maxdepth 1 -type f \( -name '*.mp3' -o -name '*.json' \) -exec ls -lh {} + 2>/dev/null | awk '{print "     "$9"  "$5}'

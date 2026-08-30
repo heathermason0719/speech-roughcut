@@ -44,6 +44,34 @@
     return best;
   }
 
+  // 从候选静音中扣除用户明确保留的词/空白，避免吸附或内部静音二次切割吞掉恢复项。
+  function subtractProtected(periods, protectedSegments) {
+    const protectedSorted = (protectedSegments || []).slice().sort((a, b) => a.start - b.start);
+    if (!protectedSorted.length) return periods;
+
+    const out = [];
+    for (const period of periods) {
+      let pieces = [{ start: period.start, end: period.end }];
+      for (const protectedSeg of protectedSorted) {
+        if (protectedSeg.end <= period.start) continue;
+        if (protectedSeg.start >= period.end) break;
+        const next = [];
+        for (const piece of pieces) {
+          if (protectedSeg.end <= piece.start || protectedSeg.start >= piece.end) {
+            next.push(piece);
+            continue;
+          }
+          if (protectedSeg.start > piece.start) next.push({ start: piece.start, end: protectedSeg.start });
+          if (protectedSeg.end < piece.end) next.push({ start: protectedSeg.end, end: piece.end });
+        }
+        pieces = next;
+        if (!pieces.length) break;
+      }
+      out.push(...pieces.filter(piece => piece.end > piece.start));
+    }
+    return out;
+  }
+
   /**
    * @param {{start:number,end:number}[]} deleteList 用户选中的删除段（无需排序）
    * @param {{start:number,end:number}[]} silencePeriods ffmpeg 检测的静音段
@@ -57,14 +85,19 @@
     // 未显式给 padStart/padEnd 时退回对称 padFrames，保持旧行为。
     const padStart = (opts && opts.padStart != null) ? opts.padStart : o.padFrames;
     const padEnd = (opts && opts.padEnd != null) ? opts.padEnd : o.padFrames;
-    const periods = (silencePeriods || []).slice().sort((a, b) => a.start - b.start);
+    const protectedSegments = (o.protectedSegments || []).slice().sort((a, b) => a.start - b.start);
+    const rawPeriods = (silencePeriods || []).slice().sort((a, b) => a.start - b.start);
+    const periods = subtractProtected(rawPeriods, protectedSegments);
 
     // 1) 合并删除段
     const sorted = (deleteList || []).slice().sort((a, b) => a.start - b.start);
     const merged = [];
     for (const seg of sorted) {
       const last = merged[merged.length - 1];
-      if (!last || seg.start > last.end + o.mergeGap) merged.push({ start: seg.start, end: seg.end });
+      const protectsGap = last && protectedSegments.some(protectedSeg =>
+        protectedSeg.start < seg.start && protectedSeg.end > last.end
+      );
+      if (!last || seg.start > last.end + o.mergeGap || protectsGap) merged.push({ start: seg.start, end: seg.end });
       else last.end = Math.max(last.end, seg.end);
     }
 
@@ -107,7 +140,19 @@
       if (keep.end > cur + o.minKeepDur) finalKeeps.push({ start: cur, end: keep.end });
     }
 
-    return finalKeeps;
+    // 最终兜底：用户明确恢复的区间是硬约束。即使静音吸附越过它，或它短于
+    // minKeepDur，也要把不与显式删除段重叠的部分并回保留结果。
+    const protectedKeeps = subtractProtected(protectedSegments, sorted)
+      .map(seg => ({ start: Math.max(0, seg.start), end: Math.min(duration, seg.end) }))
+      .filter(seg => seg.end > seg.start);
+    const ensuredKeeps = [...finalKeeps, ...protectedKeeps].sort((a, b) => a.start - b.start);
+    const mergedKeeps = [];
+    for (const keep of ensuredKeeps) {
+      const last = mergedKeeps[mergedKeeps.length - 1];
+      if (!last || keep.start > last.end + 1e-6) mergedKeeps.push({ start: keep.start, end: keep.end });
+      else last.end = Math.max(last.end, keep.end);
+    }
+    return mergedKeeps;
   }
 
   // 区间相减：a 减去 b（两侧都已按 start 升序、内部不重叠），丢弃短于 minDur 的碎片。

@@ -1,4 +1,4 @@
-# 凭证（实际 key 放在 ~/.claude/skills/.env，不进仓库）
+# 凭证（实际 key 推荐放在本 skill 目录的 .env，不进仓库）
 .env
 
 # 运行时状态文件

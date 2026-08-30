@@ -34,7 +34,7 @@ const DEFAULTS = {
 };
 
 function decodeEnvelope(audioFile, SR, frameMs) {
-  const pcm = execSync(`ffmpeg -i "${audioFile}" -ac 1 -ar ${SR} -f s16le -`, { maxBuffer: 1 << 29 });
+  const pcm = execSync(`ffmpeg -v error -i "${audioFile}" -ac 1 -ar ${SR} -f s16le -`, { maxBuffer: 1 << 29 });
   const N = Math.floor(pcm.length / 2);
   const win = Math.round(SR * frameMs / 1000);
   const env = [];
