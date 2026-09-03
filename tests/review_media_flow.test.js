@@ -8,6 +8,10 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { pathToFileURL } = require('node:url');
+const { compileEdit } = require('../scripts/lib/compile_edit');
+const { createEditState } = require('../scripts/lib/edit_state');
+const { parseLearningDiff } = require('../scripts/lib/learning_diff');
+const { makeAudio } = require('./helpers/media_fixtures');
 
 const prepareScript = path.resolve(__dirname, '../scripts/prepare_media.js');
 const generateReviewScript = path.resolve(__dirname, '../scripts/generate_review.js');
@@ -28,6 +32,7 @@ function waitUntilReady(child) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('审核服务器启动超时')), 5000);
     let output = '';
+    let errors = '';
     child.stdout.on('data', chunk => {
       output += chunk;
       if (output.includes('READY_PORT=')) {
@@ -35,57 +40,64 @@ function waitUntilReady(child) {
         resolve();
       }
     });
+    child.stderr.on('data', chunk => { errors += chunk; });
     child.once('exit', code => {
       clearTimeout(timeout);
-      reject(new Error(`审核服务器提前退出: ${code}\n${output}`));
+      reject(new Error(`审核服务器提前退出: ${code}\n${output}\n${errors}`));
     });
   });
 }
 
-const formats = {
-  mp3: { codec: 'libmp3lame', mime: 'audio/mpeg' },
-  m4a: { codec: 'aac', mime: 'audio/mp4' },
-  wav: { codec: 'pcm_s16le', mime: 'audio/wav' },
-};
-
-for (const [ext, format] of Object.entries(formats)) {
-  test(`${ext} 从转写到审核、播放和 FCPXML 始终引用同一原文件`, async (t) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), `speech-roughcut-flow-${ext}-`));
+for (const extension of ['mp3', 'm4a', 'wav']) {
+  test(`${extension} 审核数据按四模型分离，播放统一 MP3，整数 plan 导出仍引用原始资产`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `speech-roughcut-flow-${extension}-`));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const source = path.join(root, `source.${ext}`);
-    execFileSync('ffmpeg', [
-      '-v', 'error', '-f', 'lavfi',
-      '-i', 'sine=frequency=660:sample_rate=48000:duration=1',
-      '-c:a', format.codec, source,
-    ]);
-
+    const source = makeAudio(root, extension, { duration: 1.5 });
     const transcribeDir = path.join(root, '1_转录');
     const reviewDir = path.join(root, '3_审核');
     const wordsFile = path.join(root, 'words.json');
+    const breaksFile = path.join(root, 'asr_breaks.json');
     const selectedFile = path.join(root, 'selected.json');
-    fs.writeFileSync(wordsFile, JSON.stringify([
-      { text: '测', start: 0.1, end: 0.3, isGap: false },
-      { text: '试', start: 0.3, end: 0.5, isGap: false },
-    ]));
-    fs.writeFileSync(selectedFile, '[]');
+    const words = [
+      { id: 'word-000000', text: '测', startSample: 4800, endSample: 14400 },
+      { id: 'word-000001', text: '试', startSample: 14400, endSample: 24000 },
+    ];
+    const asrBreaks = [];
+    fs.writeFileSync(wordsFile, JSON.stringify(words));
+    fs.writeFileSync(breaksFile, JSON.stringify(asrBreaks));
+    fs.writeFileSync(selectedFile, JSON.stringify({ wordIds: ['word-000001'] }));
 
     execFileSync(process.execPath, [prepareScript, source, transcribeDir]);
-    const sourceManifest = path.join(transcribeDir, 'media_manifest.json');
+    const contextPath = path.join(transcribeDir, 'media_context.json');
     execFileSync(process.execPath, [
-      generateReviewScript, wordsFile, selectedFile, sourceManifest, reviewDir,
+      generateReviewScript,
+      wordsFile,
+      breaksFile,
+      selectedFile,
+      contextPath,
+      reviewDir,
     ]);
 
-    const reviewManifest = path.join(reviewDir, 'media_manifest.json');
-    const manifest = JSON.parse(fs.readFileSync(reviewManifest, 'utf8'));
-    assert.equal(manifest.analysisPath, path.resolve(source));
-    assert.equal(manifest.playbackPath, path.resolve(source));
-    assert.equal(manifest.exportPath, path.resolve(source));
-    assert.equal(fs.existsSync(path.join(transcribeDir, 'audio.mp3')), false);
-    assert.equal(fs.existsSync(path.join(reviewDir, 'audio.mp3')), false);
-    assert.ok(JSON.parse(fs.readFileSync(path.join(reviewDir, 'peaks.json'), 'utf8')).peaks.length > 0);
+    const context = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
+    const data = JSON.parse(fs.readFileSync(path.join(reviewDir, 'data.json'), 'utf8'));
+    assert.deepEqual(data.words, words);
+    assert.deepEqual(data.asrBreaks, asrBreaks);
+    assert.deepEqual(data.initialSuggestedWordDeletes, ['word-000001']);
+    assert.deepEqual(data.mediaContext, context);
+    assert.deepEqual(data.silenceThresholds, [-30, -35, -40, -45]);
+    assert.equal(JSON.stringify(data).includes('isGap'), false);
+    assert.equal(fs.existsSync(path.join(reviewDir, 'media_context.json')), false);
+    const peaks = JSON.parse(fs.readFileSync(path.join(reviewDir, 'peaks.json'), 'utf8'));
+    assert.equal(peaks.sampleRate, 48000);
+    assert.equal(peaks.bucketSamples, 480);
+    assert.equal('duration' in peaks, false);
+    assert.ok(Array.isArray(peaks.values));
+    const detectedSilence = JSON.parse(fs.readFileSync(path.join(reviewDir, 'detected_silence.json'), 'utf8'));
+    assert.ok(Array.isArray(detectedSilence));
+    assert.ok(detectedSilence.every(item => data.silenceThresholds.includes(item.thresholdDb)));
 
     const port = await freePort();
-    const child = spawn(process.execPath, [serverScript, String(port), reviewManifest], {
+    const child = spawn(process.execPath, [serverScript, String(port), contextPath], {
       cwd: reviewDir,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -94,18 +106,34 @@ for (const [ext, format] of Object.entries(formats)) {
 
     const mediaResponse = await fetch(`http://127.0.0.1:${port}/video`);
     assert.equal(mediaResponse.status, 200);
-    assert.equal(mediaResponse.headers.get('content-type'), format.mime);
-    assert.deepEqual(Buffer.from(await mediaResponse.arrayBuffer()), fs.readFileSync(source));
+    assert.equal(mediaResponse.headers.get('content-type'), 'audio/mpeg');
+    assert.deepEqual(Buffer.from(await mediaResponse.arrayBuffer()), fs.readFileSync(context.reviewAudioPath));
 
+    const editState = createEditState({
+      initialSuggestedWordDeletes: data.initialSuggestedWordDeletes,
+      policy: { autoSilenceEnabled: false },
+    });
+    const compiledCutPlan = compileEdit({
+      words: data.words,
+      asrBreaks: data.asrBreaks,
+      detectedSilence: detectedSilence.filter(item => item.thresholdDb === -35),
+      editState,
+      mediaContext: data.mediaContext,
+    });
     const exportResponse = await fetch(`http://127.0.0.1:${port}/api/fcpxml`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deleteList: [], finalSelected: [], includeTitles: false }),
+      body: JSON.stringify({ compiledCutPlan, includeTitles: false }),
     });
     assert.equal(exportResponse.status, 200);
     const exportResult = await exportResponse.json();
     assert.equal(exportResult.success, true);
     const xml = fs.readFileSync(exportResult.output, 'utf8');
-    assert.match(xml, new RegExp(pathToFileURL(source).href.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(xml, new RegExp(pathToFileURL(source).href.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(xml, /review_audio\.mp3/);
+    const learningDiff = parseLearningDiff(fs.readFileSync(exportResult.learningDiff, 'utf8'));
+    assert.equal(learningDiff.mediaName, path.basename(source));
+    assert.deepEqual(learningDiff.aiOnly, []);
+    assert.deepEqual(learningDiff.userOnly, []);
   });
 }

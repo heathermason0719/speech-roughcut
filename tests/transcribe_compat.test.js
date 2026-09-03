@@ -7,71 +7,52 @@ let compat = {};
 try {
   compat = require('../scripts/lib/transcribe_compat');
 } catch (_) {
-  // RED 阶段模块尚不存在。
+  // RED: 新合同尚未实现。
 }
 
-test('auto 轮到极速版时 M4A 改走标准版', () => {
-  assert.equal(typeof compat.selectEngineForFormat, 'function');
-  assert.equal(compat.selectEngineForFormat({
-    requestedEngine: 'auto',
-    selectedEngine: 'flash',
-    extension: 'm4a',
-  }), 'v3-standard');
-});
-
-test('显式指定极速版处理 M4A 时给出明确错误', () => {
-  assert.throws(() => compat.selectEngineForFormat({
-    requestedEngine: 'flash',
-    selectedEngine: 'flash',
-    extension: 'm4a',
-  }), /M4A.*极速版.*不支持/);
-});
-
-for (const extension of ['mp3', 'wav']) {
-  test(`${extension} 保持 auto 已选择的转写引擎`, () => {
-    assert.equal(compat.selectEngineForFormat({
-      requestedEngine: 'auto',
-      selectedEngine: 'flash',
-      extension,
-    }), 'flash');
-    assert.equal(compat.selectEngineForFormat({
-      requestedEngine: 'auto',
-      selectedEngine: 'v3-standard',
-      extension,
-    }), 'v3-standard');
-  });
-}
-
-test('auto 遇到超过极速版上限的兼容音频时改走标准版', () => {
-  assert.equal(compat.selectEngineForFormat({
-    requestedEngine: 'auto',
-    selectedEngine: 'flash',
-    extension: 'wav',
-    sizeBytes: 100 * 1024 * 1024 + 1,
-    duration: 30,
-  }), 'v3-standard');
-  assert.equal(compat.selectEngineForFormat({
-    requestedEngine: 'auto',
-    selectedEngine: 'flash',
+function review(overrides = {}) {
+  return {
     extension: 'mp3',
     sizeBytes: 1024,
-    duration: 2 * 60 * 60 + 0.001,
-  }), 'v3-standard');
+    decodedSampleCount: 48000,
+    sampleRate: 48000,
+    ...overrides,
+  };
+}
+
+test('源 M4A 不再改变实际审核 MP3 的引擎选择', () => {
+  assert.equal(typeof compat.selectEngineForReview, 'function');
+  assert.equal(compat.selectEngineForReview({
+    requestedEngine: 'auto',
+    selectedEngine: 'flash',
+    review: review(),
+  }), 'flash');
 });
 
-test('显式引擎在上传前拒绝超过自身上限的音频', () => {
-  assert.throws(() => compat.selectEngineForFormat({
+test('转写限制只使用审核文件大小与 decoded-sample duration', () => {
+  assert.equal(compat.selectEngineForReview({
+    requestedEngine: 'auto',
+    selectedEngine: 'flash',
+    review: review({ decodedSampleCount: 2 * 60 * 60 * 48000 + 1 }),
+  }), 'v3-standard');
+
+  assert.throws(() => compat.selectEngineForReview({
     requestedEngine: 'flash',
     selectedEngine: 'flash',
-    extension: 'wav',
-    sizeBytes: 100 * 1024 * 1024 + 1,
-    duration: 30,
+    review: review({ sizeBytes: 100 * 1024 * 1024 + 1 }),
   }), /极速版.*100MB/);
-  assert.throws(() => compat.selectEngineForFormat({
+
+  assert.throws(() => compat.selectEngineForReview({
     requestedEngine: 'v3-standard',
     selectedEngine: 'v3-standard',
-    extension: 'mp3',
-    sizeBytes: 512 * 1024 * 1024 + 1,
-    duration: 30,
-  }), /标准版.*512MB/);
+    review: review({ decodedSampleCount: 5 * 60 * 60 * 48000 + 1 }),
+  }), /标准版.*5 小时/);
+});
+
+test('非 MP3 审核文件在上传前明确失败', () => {
+  assert.throws(() => compat.selectEngineForReview({
+    requestedEngine: 'auto',
+    selectedEngine: 'flash',
+    review: review({ extension: 'm4a' }),
+  }), /审核文件.*MP3/);
 });

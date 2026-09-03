@@ -16,20 +16,20 @@ description: 口播视频或音频转录和口误识别。生成审查稿和删�
 
 **模式 A（剪口播）：**
 ```
-output/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
-├── 1_转录/   media_manifest.json · volcengine_v3_result.json · subtitles_words.json
-│              audio.mp3（仅视频或非直通格式生成分析代理时存在）
+~/Movies/ROUGHCUT-OutPut/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
+├── 1_转录/   media_context.json · review_audio.mp3 · volcengine_v3_result.json
+│              subtitles_words.json · asr_breaks.json
 ├── 2_分析/   analysis.txt · sentence_map.json · speech_errors.json · auto_selected.json
-└── 3_审核/   review.html · media_manifest.json · data.json · peaks.json · silence_periods.json
-                <媒体名>_cut.fcpxml   ← 网页点击「导出 FCPXML」后生成在此目录
-                                       拖入剪映 / Final Cut Pro 完成最终剪辑
+└── 3_审核/   review.html · data.json · peaks.json · detected_silence.json
+                <媒体名>_cut.fcpxml · learning_diff.json
+                ↑ 网页点击「导出 FCPXML」后生成；FCPXML 引用原始媒体资产
 ```
 
 **模式 B（转字幕）：**
 ```
-output/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
-├── 1_转录/   media_manifest.json · volcengine_v3_result.json · subtitles_words.json · raw_text.txt
-│              audio.mp3（仅视频或非直通格式生成分析代理时存在）
+~/Movies/ROUGHCUT-OutPut/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
+├── 1_转录/   media_context.json · review_audio.mp3 · volcengine_v3_result.json
+│              subtitles_words.json · asr_breaks.json · raw_text.txt
 └── 2_纠错/   corrected.txt · uncertain.md（可选）
 媒体所在目录/
 └── subtitles_formatted.md   ← 最终输出
@@ -52,7 +52,7 @@ output/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
   6-7. 生成审核网页 + 启动服务器
   【等待用户确认】→ 网页点击「导出 FCPXML」→ 拖入剪映 / Final Cut Pro 完成剪辑
        （默认勾选「可编辑标题字幕」，导出时同步生成 Final Cut Pro Title）
-       （导出同时写 3_审核/review_log.json，供步骤 8 学习）
+       （导出同时写 3_审核/learning_diff.json，供步骤 8 显式学习）
   8. 自进化学习（用户显式触发「已导出，学一下」）→ diff 抽规则 → 确认 → 写 经验规则.md
 
 模式 B（转字幕）:
@@ -111,7 +111,7 @@ node "$SKILL_DIR/scripts/doctor.js"
 
 ```
 🎙️ 媒体：/path/to/口播.wav
-📁 输出：~/Desktop/output/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
+📁 输出：~/Movies/ROUGHCUT-OutPut/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
 
 请选择模式：
   [A] 剪口播 — 识别口误 → 网页审核 → 导出 FCPXML 给剪映 / FCP
@@ -120,20 +120,28 @@ node "$SKILL_DIR/scripts/doctor.js"
 
 用户确认后再继续，不自动开始。
 
+**媒体硬闸门（任何网络调用之前执行）：**
+
+- 只接受 MP3、M4A、WAV，以及 CFR MP4/M4V/MOV；视频必须是 CFR，且素材恰好有一条主音轨。
+- 当前只支持有效 presentation start 为 0、时间戳连续单调、播放速率为 1 的素材。
+- CFR 视频逐帧核对实际视频终点与主音轨终点；差值超过一帧时在生成审核文件前失败。
+- VFR 必须原样失败：`仅支持 CFR，请先转码为 CFR 后重新执行`。
+- 所有正式输入统一生成一次 `review_audio.mp3`（48 kHz、单声道、64 kbps CBR、零 PTS）；审核时长来自解码 PCM sample count，不取容器 duration。
+- 静音最终证据来自 PCM 能量。ASR break 与 detected silence 分开保存，ASR break 不能单独产生静音或删除。
+- 工作台、波形、播放跳段、文字、标题和导出只消费同一份整数 `compiledCutPlan`。FCPXML 引用原始资产，不引用审核音频。
+
 ### 步骤 1-4: 一键转录流水线（无需 AI）
 
 ```bash
 SKILL_DIR="<本 skill 的安装目录>"   # 见上方「路径约定」
 MEDIA_PATH="/path/to/视频或音频"
-BASE_DIR="$HOME/Desktop/output/$(date +%Y-%m-%d_%H-%M)_$(basename "$MEDIA_PATH" | sed 's/\.[^.]*$//')/speech-roughcut"
+BASE_DIR="$HOME/Movies/ROUGHCUT-OutPut/$(date +%Y-%m-%d_%H-%M)_$(basename "$MEDIA_PATH" | sed 's/\.[^.]*$//')/speech-roughcut"
 
 bash "$SKILL_DIR/scripts/run_transcribe.sh" "$MEDIA_PATH" "$BASE_DIR"
-# 输出: BASE_DIR/1_转录/{media_manifest.json, volcengine_v3_result.json, subtitles_words.json}
-# MP3 / M4A / WAV 纯音频直接使用原文件，不重新编码，也不生成 audio.mp3；
-# 视频或其他格式沿用分析代理，额外生成 BASE_DIR/1_转录/audio.mp3。
-# M4A 在 --auto 下固定使用支持该格式的标准版；显式 --flash 会报格式不兼容，
-# 不会为了迁就极速版而偷偷转码。
-# MP3 / WAV 若超过极速版的 2 小时或 100MB 上限，--auto 同样改走标准版；
+# 输出: BASE_DIR/1_转录/{media_context.json, review_audio.mp3,
+#       volcengine_v3_result.json, subtitles_words.json, asr_breaks.json}
+# 每种正式输入都只上传统一规格的 review_audio.mp3；引擎兼容与额度判断也以该文件为准。
+# review_audio.mp3 若超过极速版的 2 小时或 100MB 上限，--auto 改走标准版；
 # 标准版超过 5 小时或 512MB 时会在上传前终止并说明原因。
 #
 # 默认引擎: auto 轮流（flash 极速版 auc_turbo ↔ 标准版 auc 交替）
@@ -153,6 +161,7 @@ bash "$SKILL_DIR/scripts/run_transcribe.sh" "$MEDIA_PATH" "$BASE_DIR"
 ```bash
 node "$SKILL_DIR/scripts/gen_analysis.js" \
   "$BASE_DIR/1_转录/subtitles_words.json" \
+  "$BASE_DIR/1_转录/asr_breaks.json" \
   "$BASE_DIR/2_分析"
 # 输出: analysis.txt + sentence_map.json + auto_selected.json
 ```
@@ -243,8 +252,9 @@ node "$SKILL_DIR/scripts/merge_selections.js" \
 #    前端模板在 scripts/templates/review.html，改样式直接改那里
 node "$SKILL_DIR/scripts/generate_review.js" \
   "$BASE_DIR/1_转录/subtitles_words.json" \
+  "$BASE_DIR/1_转录/asr_breaks.json" \
   "$BASE_DIR/2_分析/auto_selected.json" \
-  "$BASE_DIR/1_转录/media_manifest.json" \
+  "$BASE_DIR/1_转录/media_context.json" \
   "$BASE_DIR/3_审核"
 
 # 7. 启动审核服务器
@@ -252,7 +262,7 @@ node "$SKILL_DIR/scripts/generate_review.js" \
 #    健康检查、打开浏览器；若环境禁止开新窗口，会打印一条手动命令兜底。
 #    （不要再用 `&` / nohup 在 agent 后台挂服务——见下方「为什么」。）
 bash "$SKILL_DIR/scripts/serve_review.sh" \
-  "$BASE_DIR/3_审核" "$BASE_DIR/3_审核/media_manifest.json" "$SKILL_DIR/scripts/review_server.js"
+  "$BASE_DIR/3_审核" "$BASE_DIR/1_转录/media_context.json" "$SKILL_DIR/scripts/review_server.js"
 ```
 
 > **⚠️ 为什么必须用 `serve_review.sh`，不能直接后台 `&`/nohup 挂服务（重要，否则用户会「拒绝连接」）：**
@@ -263,29 +273,31 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 >
 > 所以**不要依赖 agent 替你保活**。`serve_review.sh` 改在 OS 层另起一个真正的终端窗口前台运行
 > （macOS 写可双击的 `.command` 并 `open`；Linux/Windows 起对应终端），它由系统拥有、不随 agent
-> 命令回收。脚本最后还会打印一条 `bash "<3_审核>/启动审核服务.command"` 的手动命令——
+> 命令回收。脚本最后还会打印一条已按 shell 规则安全转义的 `bash` 手动命令——
 > 万一连开窗口都被禁，让用户在自己的终端里跑这一条、**保持窗口开着**即可。
 >
 > 服务器启动时会把地址写进 `3_审核/server_url.txt`、进程号写进 `.review_server.pid`，方便排障。
 
-用户在网页中：播放片段确认 → 勾选/取消 → 点击「导出 FCPXML」→ 生成的 `*_cut.fcpxml` 拖入剪映或 Final Cut Pro 完成最终剪辑。
+用户在网页中：播放片段确认 → 勾选/取消 → 点击「导出 FCPXML」→ 生成的 `*_cut.fcpxml` 拖入剪映或 Final Cut Pro 完成最终剪辑。工作台的播放跳段、波形、文字、标题预览和导出请求都引用同一次编译得到的整数 `compiledCutPlan`；服务端只校验并渲染，不重新计算剪辑语义、padding 或量化。
 
 「可编辑标题字幕」默认勾选。开启时，服务器在导出阶段把已完成的字级转写转换成 Final Cut Pro 的 Basic Title：删除的词不进入字幕，字幕块不跨越剪辑断点；工作台已有短行保持不动，仅对超过 14 个中文字视觉宽度的长行拆分（ASCII 字符按半个中文字计宽，英文单词不从中间拆开）。关闭时不写 Title，保持原来的纯媒体 FCPXML 输出。
 
-> **导出时服务器同时写一份 `3_审核/review_log.json`**（与 FCPXML 同一次点击产出）：记录
-> AI 初选 idx、用户最终 idx、切割参数，以及二者**词级 diff**（带文字+句子上下文）。
-> 这是步骤 8「自进化学习」的唯一原料，**不读 `.fcpxml`**（那是算完的时间线，丢失了词级选择）。
+> **导出时服务器同时写一份当前格式 `3_审核/learning_diff.json`**：只比较
+> `initialSuggestedWordDeletes` 与最终真实 word 删除决定，记录 AI-only/user-only 的 word ID、文字和必要上下文。
+> ASR break、detected silence、阈值、padding 与 source/output ticks 均不进入该文件。它是本次 invocation 的临时交接物，不是可重开的工程。
 
 ### 步骤 8: 自进化学习（用户显式触发）
 
-> **不自动跑。** 用户导出后，在**任意会话**说「<项目> 已导出，学一下」之类，才执行本步。
-> 本步只读文件、不依赖对话上下文还在，所以冷会话也能跑。
+> **不自动跑。** 用户必须在当前或新会话中显式提供一份仍存在的当前格式 `learning_diff.json` 路径并要求学习。
+> 未给路径时停止，不搜索任何 output；不批量发现历史 invocation，不迁移旧目录，也不尝试读取旧格式。
 
-1. **定位日志**：单个项目读 `<project>/speech-roughcut/3_审核/review_log.json`；
-   批量重学则 glob `~/Desktop/output/*/speech-roughcut/3_审核/review_log.json`，逐个汇总。
-   （日志只存在项目里，清理 output 会丢语料。）
+1. **读取显式文件**：只读取用户本次提供的精确路径，并用当前格式校验器明确验证：
+   ```bash
+   node "$SKILL_DIR/scripts/read_learning_diff.js" "/用户显式提供/learning_diff.json"
+   ```
+   文件缺失、格式或版本不匹配时明确失败，不换路径、不 fallback。
 2. **读现有规则**：先读 `用户习惯/经验规则.md` **全文** + `用户习惯/规则.md`，避免重复提已有规则。
-3. **看 diff 抽规则**：对每条 `diff.aiOnly`（AI 想删你留回，可能过删）和 `diff.userOnly`
+3. **看 diff 抽规则**：对每条 `aiOnly`（AI 想删、用户留回，可能过删）和 `userOnly`
    （你删了 AI 没想到，可能漏删），对比「AI 为何这么剪 vs 你为何这么剪」，
    抽象出**能泛化到下一条视频**的通用偏好。**严禁**把单条口误/语境例外固化成规则。
 4. **违例提醒**：若 diff 显示用户违反了某条已有规则，**逐条提醒**用户，让其判断
@@ -293,6 +305,10 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 5. **列给用户确认**：把候选的【新增 / 细化已有 / 合并重复 / 改某条】列出来，**等用户确认**。
 6. **写入**：确认后才改 `用户习惯/经验规则.md`，每条带出处标签 `（学于 <视频名> YYYY-MM-DD；已确认）`。
    下次步骤 5.2 即生效。
+
+### 自动验证与用户真机闸门
+
+自动测试、浏览器合成夹具、XML 解析或本机 FCPXML DTD 校验只能证明实现合同，不能替代真实听感和 Final Cut Pro 导入。第一次真实 invocation 必须由用户分别检查 MP3、M4A、WAV、CFR 视频，并在开头、中段、结尾各选清晰词核对 ASR word、工作台文字、波形声学位置与实际声音；在此之前 `asrPresentationOffset` 只能保持 `pending_user_validation`。还需由用户在 Final Cut Pro 中实际导入音频/视频 FCPXML，核对切点、总时长、原始资产引用和可编辑 Basic Title。完成这些人工闸门前，不得宣称产品级最终 PASS。
 
 ### 模式 B: 转字幕
 
@@ -304,6 +320,7 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 ```bash
 node "$SKILL_DIR/scripts/extract_text.js" \
   "$BASE_DIR/1_转录/subtitles_words.json" \
+  "$BASE_DIR/1_转录/asr_breaks.json" \
   "$BASE_DIR/1_转录"
 # 输出: $BASE_DIR/1_转录/raw_text.txt
 ```

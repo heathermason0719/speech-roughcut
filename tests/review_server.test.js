@@ -9,7 +9,13 @@ const path = require('node:path');
 const test = require('node:test');
 const { pathToFileURL } = require('node:url');
 
+const { compileEdit } = require('../scripts/lib/compile_edit');
+const { createEditState } = require('../scripts/lib/edit_state');
+const { parseLearningDiff } = require('../scripts/lib/learning_diff');
+const { makeAudio } = require('./helpers/media_fixtures');
+
 const serverScript = path.resolve(__dirname, '../scripts/review_server.js');
+const prepareScript = path.resolve(__dirname, '../scripts/prepare_media.js');
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -26,6 +32,7 @@ function waitUntilReady(child) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('审核服务器启动超时')), 5000);
     let output = '';
+    let errors = '';
     child.stdout.on('data', chunk => {
       output += chunk;
       if (output.includes('READY_PORT=')) {
@@ -33,75 +40,203 @@ function waitUntilReady(child) {
         resolve();
       }
     });
+    child.stderr.on('data', chunk => { errors += chunk; });
     child.once('exit', code => {
       clearTimeout(timeout);
-      reject(new Error(`审核服务器提前退出: ${code}\n${output}`));
+      reject(new Error(`审核服务器提前退出: ${code}\n${output}\n${errors}`));
     });
   });
 }
 
-test('审核接口按 includeTitles 开关导出或省略可编辑标题字幕', async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-server-'));
-  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+async function post(port, payload) {
+  const response = await fetch(`http://127.0.0.1:${port}/api/fcpxml`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return { response, json: await response.json() };
+}
 
-  const audioFile = path.join(tempDir, 'speech.wav');
-  execFileSync('ffmpeg', [
-    '-v', 'error', '-f', 'lavfi',
-    '-i', 'sine=frequency=1000:sample_rate=48000:duration=4',
-    '-c:a', 'pcm_s16le', audioFile,
-  ]);
-  fs.writeFileSync(path.join(tempDir, 'data.json'), JSON.stringify({
-    words: [
-      { text: '保留字幕', start: 0.1, end: 0.8, isGap: false },
-      { text: '', start: 0.8, end: 1.2, isGap: true },
-      { text: '删除字幕', start: 1.2, end: 1.8, isGap: false },
-      { text: '', start: 1.8, end: 2.2, isGap: true },
-      { text: '后段字幕', start: 2.2, end: 2.8, isGap: false },
-    ],
-    autoSelected: [],
-  }));
-  fs.writeFileSync(path.join(tempDir, 'silence_periods.json'), '[]');
+function fixtureContract(root) {
+  const source = makeAudio(root, 'wav', { duration: 4 });
+  const transcribeDir = path.join(root, '1_转录');
+  execFileSync(process.execPath, [prepareScript, source, transcribeDir]);
+  const contextFile = path.join(transcribeDir, 'media_context.json');
+  const mediaContext = JSON.parse(fs.readFileSync(contextFile, 'utf8'));
+  const words = [
+    { id: 'word-000000', text: '保留字幕', startSample: 4800, endSample: 38400 },
+    { id: 'word-000001', text: 'AI建议后保留', startSample: 57600, endSample: 86400 },
+    { id: 'word-000002', text: '用户最终删除', startSample: 105600, endSample: 134400 },
+  ];
+  const editState = createEditState({
+    initialSuggestedWordDeletes: ['word-000001'],
+    currentDeletedWordIds: ['word-000002'],
+  });
+  const compiledCutPlan = compileEdit({
+    words,
+    asrBreaks: [],
+    detectedSilence: [],
+    editState,
+    mediaContext,
+  });
+  fs.writeFileSync(path.join(root, 'data.json'), `${JSON.stringify({
+    words,
+    asrBreaks: [],
+    initialSuggestedWordDeletes: ['word-000001'],
+    mediaContext,
+  }, null, 2)}\n`);
+  return { source, contextFile, mediaContext, words, compiledCutPlan };
+}
 
+test('审核接口只接受当前 compiledCutPlan，并按开关序列化 output-time 标题', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-server-plan-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const contract = fixtureContract(root);
   const port = await freePort();
-  const child = spawn(process.execPath, [serverScript, String(port), audioFile], {
-    cwd: tempDir,
+  const child = spawn(process.execPath, [serverScript, String(port), contract.contextFile], {
+    cwd: root,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   t.after(() => child.kill('SIGTERM'));
   await waitUntilReady(child);
 
-  const sharedModule = await fetch(`http://127.0.0.1:${port}/lib/subtitle_blocks.js`);
-  assert.equal(sharedModule.status, 200);
-  assert.match(sharedModule.headers.get('content-type') || '', /javascript/);
+  const crossOrigin = await fetch(`http://127.0.0.1:${port}/`, {
+    headers: { Origin: 'https://example.invalid' },
+  });
+  assert.equal(crossOrigin.status, 403);
+  assert.equal(crossOrigin.headers.has('access-control-allow-origin'), false);
 
-  const request = async includeTitles => {
-    const response = await fetch(`http://127.0.0.1:${port}/api/fcpxml`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        includeTitles,
-        deleteList: [{ start: 1, end: 2 }],
-        finalSelected: [2],
-        opts: { mergeGap: 0, minKeepDur: 0.01, lookBack: 0, padStart: 0, padEnd: 0, minInternalSilence: 99 },
-      }),
-    });
-    assert.equal(response.status, 200);
-    const result = await response.json();
-    assert.equal(result.success, true);
-    return { xml: fs.readFileSync(result.output, 'utf8'), output: result.output };
-  };
+  const arbitraryPath = await fetch(
+    `http://127.0.0.1:${port}/api/download/${encodeURIComponent('/etc/hosts')}`,
+  );
+  assert.equal(arbitraryPath.status, 404);
 
-  const withTitles = await request(true);
-  assert.match(withTitles.xml, /<title [^>]*lane="1"/);
-  assert.match(withTitles.xml, /保留字幕/);
-  assert.doesNotMatch(withTitles.xml, /删除字幕/);
+  for (const library of ['edit_state.js', 'title_plan.js', 'compile_edit.js', 'subtitle_blocks.js', 'review_workbench.js']) {
+    const response = await fetch(`http://127.0.0.1:${port}/lib/${library}`);
+    assert.equal(response.status, 200, library);
+    assert.match(response.headers.get('content-type') || '', /javascript/);
+  }
+
+  const oldRequest = await post(port, {
+    deleteList: [{ start: 1, end: 2 }],
+    opts: {},
+    includeTitles: true,
+  });
+  assert.equal(oldRequest.response.status, 400);
+  assert.match(oldRequest.json.error, /compiledCutPlan/);
+
+  for (const mutate of [
+    plan => { plan.keeps[0].sourceStartTick = 0.5; },
+    plan => { plan.cuts[0].sourceStartTick = -1; },
+    plan => { plan.cuts[0].sourceStartTick = plan.keeps[0].sourceEndTick - 1; },
+    plan => { plan.timebase.ticksPerSecond = 0; },
+  ]) {
+    const plan = structuredClone(contract.compiledCutPlan);
+    mutate(plan);
+    const result = await post(port, { compiledCutPlan: plan, includeTitles: true });
+    assert.equal(result.response.status, 400, JSON.stringify(result.json));
+    assert.equal(result.json.success, false);
+  }
+
+  const withTitles = await post(port, {
+    compiledCutPlan: contract.compiledCutPlan,
+    includeTitles: true,
+  });
+  assert.equal(withTitles.response.status, 200, JSON.stringify(withTitles.json));
+  assert.equal(withTitles.json.success, true);
+  const xml = fs.readFileSync(withTitles.json.output, 'utf8');
+  assert.match(xml, /<title [^>]*lane="1"/);
+  assert.match(xml, /保留字幕/);
+  assert.match(xml, /AI建议后保留/);
+  assert.doesNotMatch(xml, /用户最终删除/);
+  assert.match(xml, new RegExp(pathToFileURL(contract.source).href.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(xml, /review_audio\.mp3/);
+
+  const learningPath = path.join(root, 'learning_diff.json');
+  assert.equal(fs.realpathSync(withTitles.json.learningDiff), fs.realpathSync(learningPath));
+  const learningDiff = parseLearningDiff(fs.readFileSync(learningPath, 'utf8'));
+  assert.equal(learningDiff.mediaName, path.basename(contract.source));
+  assert.deepEqual(learningDiff.aiOnly.map(item => item.wordId), ['word-000001']);
+  assert.deepEqual(learningDiff.userOnly.map(item => item.wordId), ['word-000002']);
+  assert.equal(withTitles.json.downloadUrl, '/api/download/fcpxml');
+  const download = await fetch(`http://127.0.0.1:${port}${withTitles.json.downloadUrl}`);
+  assert.equal(download.status, 200);
+  assert.equal(await download.text(), xml);
 
   const fcpDtd = '/Applications/Final Cut Pro.app/Contents/Frameworks/Interchange.framework/Versions/A/Resources/FCPXMLv1_8.dtd';
   if (fs.existsSync(fcpDtd)) {
-    execFileSync('xmllint', ['--noout', '--dtdvalid', pathToFileURL(fcpDtd).href, withTitles.output]);
+    execFileSync('xmllint', ['--noout', '--dtdvalid', pathToFileURL(fcpDtd).href, withTitles.json.output]);
   }
 
-  const withoutTitles = await request(false);
-  assert.doesNotMatch(withoutTitles.xml, /<title /);
-  assert.doesNotMatch(withoutTitles.xml, /<effect id="r3"/);
+  const withoutTitles = await post(port, {
+    compiledCutPlan: contract.compiledCutPlan,
+    includeTitles: false,
+  });
+  assert.equal(withoutTitles.response.status, 200);
+  const xmlWithoutTitles = fs.readFileSync(withoutTitles.json.output, 'utf8');
+  assert.doesNotMatch(xmlWithoutTitles, /<title |<effect id="r3"/);
+});
+
+test('服务端冻结单次 invocation 身份，context 或 data 被替换后拒绝错源导出', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-server-identity-'));
+  const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-server-other-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(otherRoot, { recursive: true, force: true }));
+  const contract = fixtureContract(root);
+  const other = fixtureContract(otherRoot);
+  const port = await freePort();
+  const child = spawn(process.execPath, [serverScript, String(port), contract.contextFile], {
+    cwd: root,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  t.after(() => child.kill('SIGTERM'));
+  await waitUntilReady(child);
+
+  fs.copyFileSync(other.contextFile, contract.contextFile);
+  fs.copyFileSync(path.join(otherRoot, 'data.json'), path.join(root, 'data.json'));
+  const result = await post(port, {
+    compiledCutPlan: contract.compiledCutPlan,
+    includeTitles: true,
+  });
+  assert.equal(result.response.status, 409, JSON.stringify(result.json));
+  assert.match(result.json.error, /invocation.*变化/);
+  assert.equal(fs.existsSync(path.join(root, `${path.basename(contract.source, path.extname(contract.source))}_cut.fcpxml`)), false);
+  assert.equal(fs.existsSync(path.join(root, 'learning_diff.json')), false);
+});
+
+test('源文件轻量指纹在服务启动后变化时导出 fail closed 且不生成 XML', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-server-fingerprint-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const contract = fixtureContract(root);
+  const output = path.join(root, `${path.basename(contract.source, path.extname(contract.source))}_cut.fcpxml`);
+  const port = await freePort();
+  const child = spawn(process.execPath, [serverScript, String(port), contract.contextFile], {
+    cwd: root,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  t.after(() => child.kill('SIGTERM'));
+  await waitUntilReady(child);
+  fs.appendFileSync(contract.source, 'fingerprint changed');
+
+  const result = await post(port, {
+    compiledCutPlan: contract.compiledCutPlan,
+    includeTitles: true,
+  });
+  assert.equal(result.response.status, 409);
+  assert.match(result.json.error, /轻量指纹/);
+  assert.equal(fs.existsSync(output), false);
+});
+
+test('服务端源码不保留旧语义编译与旧请求体职责', () => {
+  const source = fs.readFileSync(serverScript, 'utf8');
+  for (const forbidden of [
+    'computeFinalKeeps',
+    'selectedIndicesToSegments',
+    'protectedSegments',
+    'deleteList',
+    'cutOpts',
+    'toFCPTicks',
+  ]) {
+    assert.equal(source.includes(forbidden), false, forbidden);
+  }
 });

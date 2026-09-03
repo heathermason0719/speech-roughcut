@@ -31,7 +31,6 @@ for (const num of sentenceNums) {
 
   for (let i = startIdx; i <= endIdx; i++) {
     const w = words[i];
-    if (w.isGap) continue;
     console.log('  [' + i + '] ' + w.text);
   }
   console.log('');

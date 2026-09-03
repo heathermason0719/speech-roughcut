@@ -1,49 +1,56 @@
 #!/usr/bin/env node
-/**
- * 合并 AI 口误分析结果到 auto_selected.json
- *
- * 用法: node merge_selections.js <sentence_map.json> <speech_errors.json> <auto_selected.json>
- *
- * speech_errors.json 格式:
- *   旧格式: [2, 3, 11]（句号数组，向后兼容）
- *   新格式: {"delete_sentences": [2, 3], "delete_idx": [22, 23, 45]}
- */
+'use strict';
 
-const fs = require('fs');
+const fs = require('node:fs');
 
-const mapFile = process.argv[2];
-const errorsFile = process.argv[3];
-const autoFile = process.argv[4];
-
-if (!mapFile || !errorsFile || !autoFile) {
-  console.error('用法: node merge_selections.js <sentence_map.json> <speech_errors.json> <auto_selected.json>');
-  process.exit(1);
+function wordIdForIndex(index) {
+  if (!Number.isInteger(index) || index < 0) throw new Error(`无效 word idx: ${index}`);
+  return `word-${String(index).padStart(6, '0')}`;
 }
 
-const sentenceMap = JSON.parse(fs.readFileSync(mapFile, 'utf8'));
-const rawErrors = JSON.parse(fs.readFileSync(errorsFile, 'utf8'));
-const autoSelected = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
-
-// 兼容旧格式（纯数组）和新格式（对象）
-const deleteSentences = Array.isArray(rawErrors) ? rawErrors : (rawErrors.delete_sentences || []);
-const deleteIdx = Array.isArray(rawErrors) ? [] : (rawErrors.delete_idx || []);
-
-// 句号 → idx 展开
-const sentenceIdx = [];
-for (const sentNum of deleteSentences) {
-  if (sentNum < 0 || sentNum >= sentenceMap.length) {
-    console.warn('跳过无效句号: ' + sentNum);
-    continue;
+function mergeSelections(sentenceMap, speechErrors, initialSelection) {
+  if (!initialSelection || Array.isArray(initialSelection)
+      || !Array.isArray(initialSelection.wordIds)) {
+    throw new Error('auto_selected.json 必须使用当前 wordIds 对象格式');
   }
-  const { startIdx, endIdx } = sentenceMap[sentNum];
-  for (let i = startIdx; i <= endIdx; i++) {
-    sentenceIdx.push(i);
+  if (!speechErrors || Array.isArray(speechErrors)
+      || !Array.isArray(speechErrors.delete_sentences)
+      || !Array.isArray(speechErrors.delete_idx)) {
+    throw new Error('speech_errors.json 必须包含 delete_sentences 与 delete_idx 数组');
+  }
+  const selected = new Set(initialSelection.wordIds.map(String));
+  for (const sentenceIndex of speechErrors.delete_sentences) {
+    if (!Number.isInteger(sentenceIndex) || !sentenceMap[sentenceIndex]
+        || !Array.isArray(sentenceMap[sentenceIndex].wordIds)) {
+      throw new Error(`无效句号: ${sentenceIndex}`);
+    }
+    sentenceMap[sentenceIndex].wordIds.forEach(id => selected.add(String(id)));
+  }
+  speechErrors.delete_idx.forEach(index => selected.add(wordIdForIndex(index)));
+  return { wordIds: [...selected].sort() };
+}
+
+function main(argv) {
+  const [mapFile, errorsFile, autoFile] = argv;
+  if (!mapFile || !errorsFile || !autoFile) {
+    throw new Error('用法: node merge_selections.js <sentence_map.json> <speech_errors.json> <auto_selected.json>');
+  }
+  const sentenceMap = JSON.parse(fs.readFileSync(mapFile, 'utf8'));
+  const speechErrors = JSON.parse(fs.readFileSync(errorsFile, 'utf8'));
+  const initialSelection = JSON.parse(fs.readFileSync(autoFile, 'utf8'));
+  const merged = mergeSelections(sentenceMap, speechErrors, initialSelection);
+  fs.writeFileSync(autoFile, `${JSON.stringify(merged, null, 2)}\n`);
+  console.log(`AI 语言删除建议: ${merged.wordIds.length} 个 word`);
+  return merged;
+}
+
+if (require.main === module) {
+  try {
+    main(process.argv.slice(2));
+  } catch (error) {
+    console.error(`❌ 合并选择失败: ${error.message}`);
+    process.exitCode = 1;
   }
 }
 
-// 合并：静音 idx + 句级 idx + 词级 idx → 去重排序
-const merged = [...new Set([...autoSelected, ...sentenceIdx, ...deleteIdx])].sort((a, b) => a - b);
-
-fs.writeFileSync(autoFile, JSON.stringify(merged, null, 2));
-
-console.log('整句删: ' + deleteSentences.length + ' 句 (' + sentenceIdx.length + ' idx), 词级删: ' + deleteIdx.length + ' idx, 合并后总计: ' + merged.length + ' 个');
+module.exports = { mergeSelections, wordIdForIndex };

@@ -6,127 +6,243 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { fileURLToPath, pathToFileURL } = require('node:url');
 
 const { buildFcpxml } = require('../scripts/lib/fcpxml');
 
-function makeAudioFixture(dir) {
-  const audioFile = path.join(dir, 'speech.wav');
-  execFileSync('ffmpeg', [
-    '-v', 'error',
-    '-f', 'lavfi',
-    '-i', 'sine=frequency=1000:sample_rate=44100:duration=4',
-    '-c:a', 'pcm_s16le',
-    audioFile,
-  ]);
-  return audioFile;
-}
-
-function makeVideoFixture(dir) {
-  const videoFile = path.join(dir, 'speech.mp4');
-  execFileSync('ffmpeg', [
-    '-v', 'error',
-    '-f', 'lavfi',
-    '-i', 'color=color=black:size=640x360:rate=25:duration=4',
-    '-f', 'lavfi',
-    '-i', 'sine=frequency=1000:sample_rate=48000:duration=4',
-    '-shortest',
-    '-c:v', 'libx264',
-    '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac',
-    videoFile,
-  ]);
-  return videoFile;
-}
-
-test('纯音频 FCPXML 使用采样率时基并准确引用每个保留区间', (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-fcpxml-'));
-  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
-
-  const audioFile = makeAudioFixture(tempDir);
-  const { xml, finalKeeps } = buildFcpxml({
-    mediaFile: audioFile,
-    deleteList: [{ start: 1, end: 2 }],
-    silencePeriods: [],
-    cutOpts: {
-      mergeGap: 0,
-      minKeepDur: 0.01,
-      lookBack: 0,
-      padStart: 0,
-      padEnd: 0,
-      minInternalSilence: 99,
+function audioContract(sourcePath, { sampleRate = 44100, channels = 1 } = {}) {
+  const tick = seconds => Math.round(seconds * sampleRate);
+  const mediaContext = {
+    sourcePath,
+    exportPath: sourcePath,
+    reviewAudioPath: path.join(path.dirname(sourcePath), 'review_audio.mp3'),
+    mediaType: 'audio',
+    source: {
+      sampleRate,
+      channels,
+      presentationStart: 0,
+      rate: 1,
     },
-  });
-
-  assert.deepEqual(finalKeeps, [
-    { start: 0, end: 1 },
-    { start: 2, end: 4 },
-  ]);
-  assert.doesNotMatch(xml, /(?:^|[="'])\d+\/0s(?:["']|$)/);
-  assert.match(xml, /<asset [^>]*hasAudio="1"[^>]*hasVideo="0"/);
-  assert.match(xml, /<asset [^>]*audioRate="44\.1k"/);
-  assert.doesNotMatch(xml, /<asset [^>]*format="r2"/);
-  assert.match(xml, /<asset-clip [^>]*offset="0\/44100s"[^>]*start="0\/44100s"[^>]*duration="44100\/44100s"[^>]*srcEnable="audio"/);
-  assert.match(xml, /<asset-clip [^>]*offset="44100\/44100s"[^>]*start="88200\/44100s"[^>]*duration="88200\/44100s"[^>]*srcEnable="audio"/);
-  assert.match(xml, /<sequence duration="132300\/44100s"/);
-});
-
-test('视频 FCPXML 继续使用原有帧时基和视频资产声明', (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-fcpxml-'));
-  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
-
-  const videoFile = makeVideoFixture(tempDir);
-  const { xml } = buildFcpxml({
-    videoFile,
-    deleteList: [{ start: 1, end: 2 }],
-    silencePeriods: [],
-    cutOpts: {
-      mergeGap: 0,
-      minKeepDur: 0.01,
-      lookBack: 0,
-      padStart: 0,
-      padEnd: 0,
-      minInternalSilence: 99,
-    },
-  });
-
-  assert.match(xml, /<format id="r2" frameDuration="1\/25s" width="640" height="360"/);
-  assert.match(xml, /<asset [^>]*format="r2"[^>]*hasAudio="1"[^>]*hasVideo="1"/);
-  assert.match(xml, /<asset-clip [^>]*offset="0\/25s"[^>]*start="0\/25s"[^>]*duration="25\/25s"[^>]*format="r2"/);
-  assert.match(xml, /<asset-clip [^>]*offset="25\/25s"[^>]*start="50\/25s"[^>]*duration="50\/25s"[^>]*format="r2"/);
-  assert.match(xml, /<sequence duration="75\/25s"/);
-});
-
-test('开启字幕时为保留文字生成连接在媒体片段上的可编辑 Basic Title', (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-fcpxml-'));
-  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
-
-  const audioFile = makeAudioFixture(tempDir);
-  const { xml } = buildFcpxml({
-    mediaFile: audioFile,
-    deleteList: [{ start: 1, end: 2 }],
-    silencePeriods: [],
-    cutOpts: {
-      mergeGap: 0,
-      minKeepDur: 0.01,
-      lookBack: 0,
-      padStart: 0,
-      padEnd: 0,
-      minInternalSilence: 99,
-    },
-    includeTitles: true,
-    selectedIndices: [2],
-    subtitleWords: [
-      { text: '第一句', start: 0.1, end: 0.8, isGap: false },
-      { text: '', start: 0.8, end: 1.2, isGap: true },
-      { text: '删除文字', start: 1.2, end: 1.8, isGap: false },
-      { text: '', start: 1.8, end: 2.2, isGap: true },
-      { text: '第二句', start: 2.2, end: 2.8, isGap: false },
+    review: { sampleRate: 48000, decodedSampleCount: 192000 },
+    timebase: { kind: 'audio-samples', ticksPerSecond: sampleRate },
+    offsets: { sourceMediaOffset: { seconds: 0, status: 'verified' } },
+  };
+  const compiledCutPlan = {
+    timebase: { kind: 'audio-samples', ticksPerSecond: sampleRate },
+    reviewSampleRate: 48000,
+    reviewDecodedSampleCount: 192000,
+    sourceOriginTick: 0,
+    sourceDurationTicks: 4 * sampleRate,
+    keeps: [
+      { id: 'keep-0000', sourceStartTick: 0, sourceEndTick: sampleRate, outputStartTick: 0, outputEndTick: sampleRate, reviewStartSample: 0, reviewEndSample: 48000 },
+      { id: 'keep-0001', sourceStartTick: 2 * sampleRate, sourceEndTick: 4 * sampleRate, outputStartTick: sampleRate, outputEndTick: 3 * sampleRate, reviewStartSample: 96000, reviewEndSample: 192000 },
     ],
+    cuts: [
+      { id: 'cut-0000', sourceStartTick: sampleRate, sourceEndTick: 2 * sampleRate, reviewStartSample: 48000, reviewEndSample: 96000 },
+    ],
+    retainedWordIds: ['word-000000', 'word-000002'],
+    titleBlocks: [
+      { id: 'title-0000', text: '第一句', keepIndex: 0, sourceStartTick: tick(0.1), sourceEndTick: tick(0.8), outputStartTick: tick(0.1), outputEndTick: tick(0.8), reviewStartSample: 4800, reviewEndSample: 38400, wordIds: ['word-000000'] },
+      { id: 'title-0001', text: '第二句', keepIndex: 1, sourceStartTick: tick(2.2), sourceEndTick: tick(2.8), outputStartTick: tick(1.2), outputEndTick: tick(1.8), reviewStartSample: 105600, reviewEndSample: 134400, wordIds: ['word-000002'] },
+    ],
+    wordDecisions: { initialSuggestedWordDeleteIds: ['word-000001'], finalDeletedWordIds: ['word-000001'] },
+  };
+  return { mediaContext, compiledCutPlan };
+}
+
+function videoContract(sourcePath) {
+  return {
+    mediaContext: {
+      sourcePath,
+      exportPath: sourcePath,
+      reviewAudioPath: path.join(path.dirname(sourcePath), 'review_audio.mp3'),
+      mediaType: 'video',
+      source: {
+        sampleRate: 48000,
+        channels: 2,
+        presentationStart: 0,
+        rate: 1,
+        video: { fpsNum: 30000, fpsDen: 1001, width: 1920, height: 1080, isCfr: true, presentationStart: 0 },
+      },
+      review: { sampleRate: 48000, decodedSampleCount: 192192 },
+      timebase: { kind: 'video-frames', fpsNum: 30000, fpsDen: 1001 },
+      offsets: { sourceMediaOffset: { seconds: 0, status: 'verified' } },
+    },
+    compiledCutPlan: {
+      timebase: { kind: 'video-frames', fpsNum: 30000, fpsDen: 1001 },
+      reviewSampleRate: 48000,
+      reviewDecodedSampleCount: 192192,
+      sourceOriginTick: 0,
+      sourceDurationTicks: 120,
+      keeps: [
+        { id: 'keep-0000', sourceStartTick: 0, sourceEndTick: 30, outputStartTick: 0, outputEndTick: 30, reviewStartSample: 0, reviewEndSample: 48048 },
+        { id: 'keep-0001', sourceStartTick: 60, sourceEndTick: 120, outputStartTick: 30, outputEndTick: 90, reviewStartSample: 96096, reviewEndSample: 192192 },
+      ],
+      cuts: [{ id: 'cut-0000', sourceStartTick: 30, sourceEndTick: 60, reviewStartSample: 48048, reviewEndSample: 96096 }],
+      retainedWordIds: ['word-000000'],
+      titleBlocks: [
+        { id: 'title-0000', text: 'Output Title', keepIndex: 1, sourceStartTick: 65, sourceEndTick: 75, outputStartTick: 35, outputEndTick: 45, reviewStartSample: 104104, reviewEndSample: 120120, wordIds: ['word-000000'] },
+      ],
+      wordDecisions: { initialSuggestedWordDeleteIds: [], finalDeletedWordIds: [] },
+    },
+  };
+}
+
+for (const [kind, makeContract] of [['audio', audioContract], ['video', videoContract]]) {
+  for (const [label, sourcePath, outputDirectory] of [
+    ['source ampersand', '/tmp/a&b.wav', '/tmp/roughcut-export'],
+    ['output ampersand', '/tmp/plain.wav', '/tmp/roughcut-a&b'],
+    ['mixed special characters', '/tmp/原始 &amp; "引号" #100%.wav', '/tmp/导出 & <test>'],
+  ]) {
+    test(`${kind} 特殊字符路径经过 XML 解析后仍定位原文件：${label}`, () => {
+      const contract = makeContract(sourcePath);
+      const before = structuredClone(contract);
+      const { xml, outputPath } = buildFcpxml({ ...contract, outputDirectory });
+      const attribute = xpath => execFileSync('xmllint', ['--xpath', `string(${xpath})`, '-'], {
+        input: xml,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+
+      assert.equal(fileURLToPath(attribute('/fcpxml/resources/asset/@src')), sourcePath);
+      assert.equal(fileURLToPath(attribute('/fcpxml/library/@location')), outputPath);
+      assert.deepEqual(contract, before);
+    });
+  }
+}
+
+test('纯音频 renderer 保持媒体 ticks，并用父片段本地坐标挂载 Title', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-fcpxml-plan-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, '原始 语音.wav');
+  fs.writeFileSync(source, 'renderer must not probe this file');
+  const contract = audioContract(source);
+  const { xml, finalKeeps, outputPath } = buildFcpxml({
+    ...contract,
+    includeTitles: true,
+    outputDirectory: root,
   });
 
-  assert.match(xml, /<effect id="r3" name="Basic Title" uid="[^"]*Basic Title\.moti"/);
-  assert.equal((xml.match(/<title /g) || []).length, 2);
-  assert.match(xml, /<asset-clip[^>]*start="0\/44100s"[^>]*>[\s\S]*?<title [^>]*lane="1"[^>]*>[\s\S]*?第一句[\s\S]*?<\/title>[\s\S]*?<\/asset-clip>/);
-  assert.match(xml, /<asset-clip[^>]*start="88200\/44100s"[^>]*>[\s\S]*?<title [^>]*lane="1"[^>]*>[\s\S]*?第二句[\s\S]*?<\/title>[\s\S]*?<\/asset-clip>/);
-  assert.doesNotMatch(xml, /删除文字/);
+  assert.equal(finalKeeps, contract.compiledCutPlan.keeps);
+  assert.match(xml, /<asset [^>]*hasAudio="1"[^>]*hasVideo="0"[^>]*audioChannels="1"[^>]*audioRate="44\.1k"/);
+  assert.match(xml, /<asset-clip [^>]*offset="0\/44100s"[^>]*start="0\/44100s"[^>]*duration="44100\/44100s"/);
+  assert.match(xml, /<asset-clip [^>]*offset="44100\/44100s"[^>]*start="88200\/44100s"[^>]*duration="88200\/44100s"/);
+  assert.match(xml, /<sequence duration="132300\/44100s"/);
+  assert.match(xml, /<title [^>]*offset="97020\/44100s"[^>]*duration="26460\/44100s"/);
+  assert.match(xml, new RegExp(pathToFileURL(source).href.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(xml, /review_audio\.mp3/);
+  const xmlFile = path.join(root, 'parse.xml');
+  fs.writeFileSync(xmlFile, xml);
+  execFileSync('xmllint', ['--noout', xmlFile]);
+});
+
+test('非常见源采样率和多声道保留 asset 真实元数据，同时生成 DTD 合法 sequence', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-fcpxml-rate-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, 'source-16k.wav');
+  fs.writeFileSync(source, 'not media');
+  const contract = audioContract(source, { sampleRate: 16000, channels: 3 });
+  const { xml, outputPath } = buildFcpxml({ ...contract, outputDirectory: root });
+  assert.match(xml, /<asset [^>]*audioChannels="3"[^>]*audioRate="16k"/);
+  assert.match(xml, /<sequence [^>]*audioLayout="surround" audioRate="48k"/);
+  fs.writeFileSync(outputPath, xml);
+  const fcpDtd = '/Applications/Final Cut Pro.app/Contents/Frameworks/Interchange.framework/Versions/A/Resources/FCPXMLv1_8.dtd';
+  if (fs.existsSync(fcpDtd)) {
+    execFileSync('xmllint', ['--noout', '--dtdvalid', pathToFileURL(fcpDtd).href, outputPath]);
+  }
+});
+
+test('CFR 视频 renderer 保持 frame ticks，嵌套 Title 换算回工程后仍在原 output ticks', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-fcpxml-video-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, 'source.mov');
+  fs.writeFileSync(source, 'not media');
+  const contract = videoContract(source);
+  const { xml, outputPath } = buildFcpxml({ ...contract, includeTitles: true, outputDirectory: root });
+  assert.match(xml, /frameDuration="1001\/30000s" width="1920" height="1080"/);
+  assert.match(xml, /<asset [^>]*format="r2"[^>]*hasAudio="1"[^>]*hasVideo="1"[^>]*audioChannels="2"[^>]*audioRate="48k"/);
+  assert.match(xml, /<asset-clip [^>]*offset="30030\/30000s"[^>]*start="60060\/30000s"[^>]*duration="60060\/30000s"/);
+  assert.match(xml, /<sequence duration="90090\/30000s"/);
+  assert.match(xml, /<title [^>]*offset="65065\/30000s"[^>]*duration="10010\/30000s"/);
+  fs.writeFileSync(outputPath, xml);
+  execFileSync('xmllint', ['--noout', outputPath]);
+  const fcpDtd = '/Applications/Final Cut Pro.app/Contents/Frameworks/Interchange.framework/Versions/A/Resources/FCPXMLv1_8.dtd';
+  if (fs.existsSync(fcpDtd)) {
+    execFileSync('xmllint', ['--noout', '--dtdvalid', pathToFileURL(fcpDtd).href, outputPath]);
+  }
+});
+
+test('非零 source start 的首段字幕正确挂载，音频和字幕不额外吸附视频帧', () => {
+  const contract = audioContract('/tmp/speech-roughcut-subframe.wav');
+  const plan = contract.compiledCutPlan;
+  plan.keeps = [{
+    id: 'keep-0000', sourceStartTick: 52921, sourceEndTick: 88201,
+    outputStartTick: 0, outputEndTick: 35280,
+    reviewStartSample: 57601, reviewEndSample: 96001,
+  }];
+  plan.cuts = [
+    { sourceStartTick: 0, sourceEndTick: 52921 },
+    { sourceStartTick: 88201, sourceEndTick: 176400 },
+  ];
+  plan.titleBlocks = [{
+    id: 'title-0000', text: '首段字幕', keepIndex: 0,
+    sourceStartTick: 57331, sourceEndTick: 61741,
+    outputStartTick: 4410, outputEndTick: 8820,
+    reviewStartSample: 62401, reviewEndSample: 67201,
+    wordIds: ['word-000000'],
+  }];
+  const before = structuredClone(plan);
+  const { xml } = buildFcpxml(contract);
+  const clip = xml.match(/<asset-clip [^>]*offset="(\d+)\/44100s"[^>]*start="(\d+)\/44100s"[^>]*duration="(\d+)\/44100s"/);
+  const title = xml.match(/<title [^>]*offset="(\d+)\/44100s"[^>]*duration="(\d+)\/44100s"/);
+
+  assert.deepEqual(clip.slice(1).map(Number), [0, 52921, 35280]);
+  // FCPXML nested offset is in the parent's local timeline, not the sequence.
+  const outputStart = Number(clip[1]) + Number(title[1]) - Number(clip[2]);
+  assert.equal(outputStart, 4410);
+  assert.equal(outputStart + Number(title[2]), 8820);
+  assert.match(xml, /<sequence duration="35280\/44100s"/);
+  assert.deepEqual(plan, before);
+});
+
+test('renderer 拒绝浮点、重叠、无效 timebase 与越界标题，关闭标题不输出 effect', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-fcpxml-invalid-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, 'source.wav');
+  fs.writeFileSync(source, 'not media');
+  const contract = audioContract(source);
+
+  const withoutTitles = buildFcpxml({ ...contract, includeTitles: false, outputDirectory: root }).xml;
+  assert.doesNotMatch(withoutTitles, /<title |<effect id="r3"/);
+
+  for (const mutate of [
+    plan => { plan.keeps[0].sourceStartTick = 0.5; },
+    plan => { plan.keeps[1].sourceStartTick = 40000; },
+    plan => { plan.timebase.ticksPerSecond = 0; },
+    plan => { plan.titleBlocks[0].outputEndTick = 50000; },
+  ]) {
+    const plan = structuredClone(contract.compiledCutPlan);
+    mutate(plan);
+    assert.throws(
+      () => buildFcpxml({ mediaContext: contract.mediaContext, compiledCutPlan: plan, includeTitles: true, outputDirectory: root }),
+      /compiledCutPlan|timebase|title block/,
+    );
+  }
+});
+
+test('FCPXML renderer 源码不含探测、语义重算或二次量化职责', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../scripts/lib/fcpxml.js'), 'utf8');
+  for (const forbidden of [
+    'ffprobe',
+    'computeFinalKeeps',
+    'selectedIndicesToSegments',
+    'protectedSegments',
+    'deleteList',
+    'cutOpts',
+    'toFCPTicks',
+    "require('child_process')",
+    "require('node:child_process')",
+  ]) {
+    assert.equal(source.includes(forbidden), false, forbidden);
+  }
 });

@@ -10,10 +10,10 @@
 #   --v3-standard 只用标准版 auc（异步 submit/query 轮询）
 #
 # 输出: base_output_dir/1_转录/
-#   ├── media_manifest.json
+#   ├── media_context.json
+#   ├── review_audio.mp3
 #   ├── volcengine_v3_result.json
 #   ├── subtitles_words.json
-#   └── audio.mp3（仅视频或非直通格式需要分析代理时生成）
 #
 
 set -e
@@ -71,17 +71,17 @@ fi
 TRANSCRIBE_DIR="$BASE_DIR/1_转录"
 mkdir -p "$TRANSCRIBE_DIR"
 
-# ── 步骤 1: 建立媒体单一来源 ─────────────────────────────
-# mp3 / m4a / wav 纯音频直接使用原文件；视频或其他格式维持旧行为，生成一个分析代理。
+# ── 步骤 1: 建立统一审核时钟 ─────────────────────────────
+# 所有正式输入都先通过 CFR/零起点/连续时间戳/rate=1 硬闸门，再生成同一规格的审核 MP3。
 echo "📦 步骤1: 检查媒体..."
-ANALYSIS_MEDIA=$(node "$SKILL_DIR/scripts/prepare_media.js" "$MEDIA_PATH" "$TRANSCRIBE_DIR")
-echo "✅ 分析媒体: $ANALYSIS_MEDIA"
+REVIEW_AUDIO=$(node "$SKILL_DIR/scripts/prepare_media.js" "$MEDIA_PATH" "$TRANSCRIBE_DIR")
+MEDIA_CONTEXT="$TRANSCRIBE_DIR/media_context.json"
+echo "✅ 审核音频: $REVIEW_AUDIO"
 
-# 极速版官方格式列表不含 M4A；auto 模式遇到 M4A 时改走支持它的标准版。
-# 用户显式指定 --flash 时不静默改变选择，由兼容检查给出明确错误。
-COMPAT_ENGINE=$(node "$SKILL_DIR/scripts/select_transcribe_engine.js" "$REQUESTED_ENGINE" "$ENGINE" "$ANALYSIS_MEDIA")
+# 引擎能力只按实际上传的 review_audio.mp3 大小与 decoded-sample duration 判断。
+COMPAT_ENGINE=$(node "$SKILL_DIR/scripts/select_transcribe_engine.js" "$REQUESTED_ENGINE" "$ENGINE" "$MEDIA_CONTEXT")
 if [ "$COMPAT_ENGINE" != "$ENGINE" ]; then
-  echo "🔀 M4A 直通需要标准版，本次从 $ENGINE 切换为 $COMPAT_ENGINE"
+  echo "🔀 审核音频超过极速版上限，本次从 $ENGINE 切换为 $COMPAT_ENGINE"
 fi
 ENGINE="$COMPAT_ENGINE"
 
@@ -90,11 +90,11 @@ echo "🚀 步骤2+3: 转录（引擎: $ENGINE）..."
 
 case "$ENGINE" in
   flash)
-    bash "$SKILL_DIR/scripts/volcengine_flash_transcribe.sh" "$ANALYSIS_MEDIA" "$TRANSCRIBE_DIR"
+    bash "$SKILL_DIR/scripts/volcengine_flash_transcribe.sh" "$REVIEW_AUDIO" "$TRANSCRIBE_DIR"
     RESULT_FILE="$TRANSCRIBE_DIR/volcengine_v3_result.json"
     ;;
   v3-standard)
-    bash "$SKILL_DIR/scripts/volcengine_v3_transcribe.sh" "$ANALYSIS_MEDIA" "$TRANSCRIBE_DIR"
+    bash "$SKILL_DIR/scripts/volcengine_v3_transcribe.sh" "$REVIEW_AUDIO" "$TRANSCRIBE_DIR"
     RESULT_FILE="$TRANSCRIBE_DIR/volcengine_v3_result.json"
     ;;
   *)
@@ -112,7 +112,7 @@ echo "✅ 步骤2+3 完成"
 echo "📝 步骤4: 生成字幕..."
 node "$SKILL_DIR/scripts/generate_subtitles.js" \
   "$RESULT_FILE" \
-  "" \
+  "$MEDIA_CONTEXT" \
   "$TRANSCRIBE_DIR"
 
 echo ""

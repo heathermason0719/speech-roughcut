@@ -1,179 +1,91 @@
 #!/usr/bin/env node
-/**
- * 生成审核数据文件 + 复制前端模板
- *
- * 用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <media_manifest.json> [输出目录]
- * 输出: data.json + review.html + media_manifest.json + 波形/静音分析数据
- */
+'use strict';
 
-const fs = require('fs');
-const path = require('path');
-const { execSync } = require('child_process');
-const { loadAndVerifyManifest } = require('./lib/media_manifest');
+const fs = require('node:fs');
+const path = require('node:path');
+const { loadAndVerifyMediaContext } = require('./lib/media_manifest');
+const { analyzeReviewAudio } = require('./lib/review_audio_analysis');
 
-const subtitlesFile = process.argv[2];
-const autoSelectedFile = process.argv[3];
-const manifestFile = process.argv[4];
-const outDir = process.argv[5] || '.';
+const WORKBENCH_SILENCE_THRESHOLDS = [-30, -35, -40, -45];
 
-if (!subtitlesFile || !autoSelectedFile || !manifestFile) {
-  console.error('用法: node generate_review.js <subtitles_words.json> <auto_selected.json> <media_manifest.json> [输出目录]');
-  process.exit(1);
+function readArray(filePath, label) {
+  if (!fs.existsSync(filePath)) throw new Error(`找不到${label}文件: ${filePath}`);
+  const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  if (!Array.isArray(value)) throw new Error(`${label}必须是数组`);
+  return value;
 }
 
-// 确保输出目录存在（recursive: true 本身幂等，无需 existsSync）
-fs.mkdirSync(outDir, { recursive: true });
-
-if (!fs.existsSync(subtitlesFile)) {
-  console.error('❌ 找不到字幕文件:', subtitlesFile);
-  process.exit(1);
-}
-
-// ── 读取字幕数据 ─────────────────────────────────────────
-const words = JSON.parse(fs.readFileSync(subtitlesFile, 'utf8'));
-const wordCount = words.filter(w => !w.isGap).length;
-const gapCount = words.filter(w => w.isGap).length;
-console.log('字幕: ' + words.length + ' 个元素（' + wordCount + ' 字 + ' + gapCount + ' 静音段）');
-
-// ── 读取 AI 预选 ─────────────────────────────────────────
-let autoSelected = [];
-if (fs.existsSync(autoSelectedFile)) {
-  try {
-    autoSelected = JSON.parse(fs.readFileSync(autoSelectedFile, 'utf8'));
-    console.log('AI 预选: ' + autoSelected.length + ' 个');
-  } catch (e) {
-    console.warn('⚠️  auto_selected.json 格式错误，跳过: ' + e.message);
-    console.warn('   请检查 AI 输出的 JSON 是否符合格式，例如 [72, 85, 120]');
+async function generateReview({
+  wordsFile,
+  asrBreaksFile,
+  autoSelectedFile,
+  contextFile,
+  outDir,
+}) {
+  const resolvedOutDir = path.resolve(outDir);
+  const words = readArray(wordsFile, 'words');
+  const asrBreaks = readArray(asrBreaksFile, 'asrBreaks');
+  if (words.some(word => word && Object.hasOwn(word, 'isGap'))) {
+    throw new Error('words 不得包含 gap 伪 word');
   }
-}
-
-// ── 写入 data.json ───────────────────────────────────────
-const data = {
-  words,
-  autoSelected,
-  generatedAt: new Date().toISOString()
-};
-fs.writeFileSync(path.join(outDir, 'data.json'), JSON.stringify(data, null, 2));
-console.log('已生成 data.json');
-
-// ── 媒体单一来源 ──────────────────────────────────────────
-// 审核目录只复制很小的权威清单，不复制或重新编码媒体本身。兼容音频模式下，
-// 转写、波形、静音、播放和导出最终都指向用户提交的同一个原文件。
-let mediaManifest;
-try {
-  mediaManifest = loadAndVerifyManifest(manifestFile);
-} catch (error) {
-  console.error('❌ 媒体清单无效: ' + error.message);
-  process.exit(1);
-}
-const analysisMedia = mediaManifest.analysisPath;
-const reviewManifest = path.join(outDir, 'media_manifest.json');
-fs.copyFileSync(path.resolve(manifestFile), reviewManifest);
-console.log('已生成 media_manifest.json（媒体不复制）');
-
-// ── 复制前端模板 ──────────────────────────────────────────
-const templateSrc = path.join(__dirname, 'templates', 'review.html');
-const templateDst = path.join(outDir, 'review.html');
-if (fs.existsSync(templateSrc)) {
-  fs.copyFileSync(templateSrc, templateDst);
-  console.log('已生成 review.html（来自模板）');
-} else {
-  console.error('❌ 找不到模板: ' + templateSrc);
-  process.exit(1);
-}
-
-// ── 静音检测（供 FCPXML 导出使用）──────────────────────────
-const SILENCE_MIN_DUR = 0.2;
-const SILENCE_PEAK_OFFSET_DB = 35; // 峰值音量 - 此偏移 = 静音阈值
-const SILENCE_DB_MIN = -55;        // 阈值下限（录音太轻时兜底）
-const SILENCE_DB_MAX = -20;        // 阈值上限（录音太响时兜底）
-const silenceOut = path.join(outDir, 'silence_periods.json');
-
-// 音频时长：末尾静音段兜底 + peaks 目标点数都要用，只探一次
-let audioDuration = 0;
-try {
-  audioDuration = parseFloat(
-    execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "file:${analysisMedia}"`).toString().trim()
-  ) || 0;
-} catch (e) {
-  console.warn('⚠️  ffprobe 读取音频时长失败: ' + e.message);
-}
-
-try {
-  // 取峰值音量，自适应计算静音阈值（峰值不受停顿多少影响，比均值更稳定）
-  const volRaw = execSync(
-    `ffmpeg -i "${analysisMedia}" -af volumedetect -f null - 2>&1`
-  ).toString();
-  const maxMatch = volRaw.match(/max_volume:\s*([-\d.]+)\s*dB/);
-  let SILENCE_DB = -35; // 默认兜底
-  if (maxMatch) {
-    const maxVol = parseFloat(maxMatch[1]);
-    SILENCE_DB = Math.max(SILENCE_DB_MIN, Math.min(SILENCE_DB_MAX, maxVol - SILENCE_PEAK_OFFSET_DB));
-    console.log(`🔊 峰值音量: ${maxVol.toFixed(1)}dB → 静音阈值: ${SILENCE_DB.toFixed(1)}dB`);
-  } else {
-    console.warn('⚠️  无法读取峰值音量，使用默认阈值 -35dB');
+  const selected = JSON.parse(fs.readFileSync(autoSelectedFile, 'utf8'));
+  if (!selected || Array.isArray(selected) || !Array.isArray(selected.wordIds)) {
+    throw new Error('auto_selected.json 必须使用当前 wordIds 对象格式');
   }
-
-  const raw = execSync(
-    `ffmpeg -i "${analysisMedia}" -af silencedetect=noise=${SILENCE_DB.toFixed(1)}dB:d=${SILENCE_MIN_DUR} -f null - 2>&1`
-  ).toString();
-  const ss = [...raw.matchAll(/silence_start: ([\d.]+)/g)];
-  const se = [...raw.matchAll(/silence_end: ([\d.]+)/g)];
-  const periods = ss.map((m, i) => ({
-    start: parseFloat(m[1]),
-    end:   se[i] ? parseFloat(se[i][1]) : audioDuration  // 末尾静音用音频时长兜底
-  }));
-
-  // ── 能量回收：补全 ASR 越界时间戳吞掉的句尾换气/静音 ──
-  // 全局 dB silencedetect 漏掉的：ASR 把字说完后的静音圈进了字里，间隙 < 0.2s 不成 gap，
-  // 换气声又比阈值响。refine_boundaries 用真实音频能量把字边界缩回真声处，挖出这些段，与 dB 取并集。
-  let finalSilence = periods;
-  try {
-    const { reclaim } = require('./lib/refine_boundaries');
-    const r = reclaim({ audioFile: analysisMedia, words, baseSilence: periods });
-    finalSilence = r.merged;
-    console.log('🎯 能量回收: 新挖出 ' + r.reclaimedCount + ' 段句尾换气/静音');
-  } catch (e) {
-    console.warn('⚠️  能量回收跳过(回退纯 dB): ' + e.message);
+  const knownWordIds = new Set(words.map(word => word.id));
+  const initialSuggestedWordDeletes = [...new Set(selected.wordIds.map(String))].sort();
+  for (const wordId of initialSuggestedWordDeletes) {
+    if (!knownWordIds.has(wordId)) throw new Error(`AI 初选引用未知 word: ${wordId}`);
   }
+  const mediaContext = loadAndVerifyMediaContext(contextFile);
+  fs.mkdirSync(resolvedOutDir, { recursive: true });
 
-  fs.writeFileSync(silenceOut, JSON.stringify(finalSilence));
-  console.log('🔕 静音检测完成，dB ' + periods.length + ' 段 → 并集 ' + finalSilence.length + ' 段 → silence_periods.json');
-} catch (e) {
-  console.warn('⚠️  silencedetect 失败，跳过: ' + e.message);
-  fs.writeFileSync(silenceOut, '[]');
+  const analysis = await analyzeReviewAudio(mediaContext.reviewAudioPath, {
+    asrBreaks,
+    silenceThresholds: WORKBENCH_SILENCE_THRESHOLDS,
+  });
+  if (analysis.peaks.decodedSampleCount !== mediaContext.review.decodedSampleCount) {
+    throw new Error('审核分析 sample count 与 media context 不一致');
+  }
+  const data = {
+    words,
+    asrBreaks,
+    initialSuggestedWordDeletes,
+    silenceThresholds: WORKBENCH_SILENCE_THRESHOLDS,
+    mediaContext,
+  };
+  fs.writeFileSync(path.join(resolvedOutDir, 'data.json'), `${JSON.stringify(data, null, 2)}\n`);
+  fs.writeFileSync(
+    path.join(resolvedOutDir, 'peaks.json'),
+    `${JSON.stringify(analysis.peaks)}\n`,
+  );
+  fs.writeFileSync(
+    path.join(resolvedOutDir, 'detected_silence.json'),
+    `${JSON.stringify(analysis.detectedSilence, null, 2)}\n`,
+  );
+  const templateSource = path.join(__dirname, 'templates', 'review.html');
+  if (!fs.existsSync(templateSource)) throw new Error(`找不到模板: ${templateSource}`);
+  fs.copyFileSync(templateSource, path.join(resolvedOutDir, 'review.html'));
+
+  console.log(`真实 words: ${words.length}`);
+  console.log(`ASR breaks: ${asrBreaks.length}`);
+  console.log(`AI 语言初选: ${initialSuggestedWordDeletes.length}`);
+  console.log(`📈 sample-domain peaks: ${analysis.peaks.values.length} buckets`);
+  console.log(`🔕 PCM 静音证据: ${analysis.detectedSilence.length} 段`);
+  console.log('✅ 审核数据准备完成');
+  return { data, mediaContext, analysis };
 }
 
-// ── 预生成波形包络 peaks.json ───────────────────────────
-// 前端审核页直接用预算好的包络渲染波形，跳过浏览器端解码 mp3 + 主线程算 peaks，
-// 长视频也能秒开、滚动顺滑。8000Hz 单声道足够画包络。
-const peaksOut = path.join(outDir, 'peaks.json');
-try {
-  const SR = 8000;
-  // 目标采样点：约 150 点/秒，封顶 60000。点更密 → 放大时波形有真实细节、不阶梯，
-  // 渲染端再做插值+平滑画成填充包络（贴近剪映/FCP）。60000 浮点 ≈ 300KB，长视频内存仍可控。
-  const pointsTarget = Math.min(60000, Math.max(2000, Math.round(audioDuration * 150)));
-  const pcm = execSync(`ffmpeg -v error -i "${analysisMedia}" -ac 1 -ar ${SR} -f s16le -`, { maxBuffer: 1 << 28 });
-  const sampleCount = Math.floor(pcm.length / 2);
-  const bucket = Math.max(1, Math.ceil(sampleCount / pointsTarget));
-  const peaks = [];
-  for (let i = 0; i < sampleCount; i += bucket) {
-    let max = 0;
-    const end = Math.min(sampleCount, i + bucket);
-    for (let j = i; j < end; j++) {
-      const v = Math.abs(pcm.readInt16LE(j * 2));
-      if (v > max) max = v;
-    }
-    peaks.push(+(max / 32768).toFixed(4)); // 归一化到 0..1
+if (require.main === module) {
+  const [wordsFile, asrBreaksFile, autoSelectedFile, contextFile, outDir = '.'] = process.argv.slice(2);
+  if (!wordsFile || !asrBreaksFile || !autoSelectedFile || !contextFile) {
+    console.error('用法: node generate_review.js <subtitles_words.json> <asr_breaks.json> <auto_selected.json> <media_context.json> [输出目录]');
+    process.exit(1);
   }
-  fs.writeFileSync(peaksOut, JSON.stringify({ duration: audioDuration, sampleRate: SR, peaks }));
-  console.log('📈 波形包络完成，' + peaks.length + ' 点 → peaks.json');
-} catch (e) {
-  console.warn('⚠️  peaks 生成失败，前端将退回实时解码: ' + e.message);
-  fs.writeFileSync(peaksOut, '[]');
+  generateReview({ wordsFile, asrBreaksFile, autoSelectedFile, contextFile, outDir }).catch(error => {
+    console.error(`❌ 生成审核数据失败: ${error.message}`);
+    process.exitCode = 1;
+  });
 }
 
-console.log('');
-console.log('✅ 审核数据准备完成');
-console.log('   启动服务器: node review_server.js');
-console.log('   打开: http://localhost:8899');
+module.exports = { generateReview };

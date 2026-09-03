@@ -15,7 +15,7 @@
 #   无论哪种，最后都会【再打印一条手动命令兜底】——万一环境禁止开新窗口，用户照着在
 #   自己的终端里跑一次即可（这条路任何环境都成立）。
 #
-# 用法: serve_review.sh <review_dir> <media_manifest_or_path> <server_js> [port|auto]
+# 用法: serve_review.sh <review_dir> <media_context.json> <server_js> [port|auto]
 #   环境变量 SERVE_REVIEW_NO_SPAWN=1 → 跳过自动开窗，只写启动脚本并打印手动命令（测试/受限环境用）
 #
 
@@ -27,13 +27,18 @@ SERVER_JS="$3"
 WANT_PORT="${4:-auto}"
 
 [ -d "$REVIEW_DIR" ] || { echo "❌ 审核目录不存在: $REVIEW_DIR"; exit 1; }
-[ -f "$MEDIA_INPUT" ] || { echo "❌ 媒体清单或文件不存在: $MEDIA_INPUT"; exit 1; }
+[ -f "$MEDIA_INPUT" ] || { echo "❌ media context 不存在: $MEDIA_INPUT"; exit 1; }
 [ -f "$SERVER_JS" ]  || { echo "❌ 找不到 review_server.js: $SERVER_JS"; exit 1; }
 
 NODE_BIN="$(command -v node || true)"
 [ -n "$NODE_BIN" ] || { echo "❌ 找不到 node，请先安装"; exit 1; }
 
 port_busy() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+print_shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
 
 if [ "$WANT_PORT" = "auto" ]; then
   PORT=""
@@ -53,8 +58,8 @@ esac
 {
   printf '%s\n' '#!/bin/bash'
   printf '%s\n' '# 双击 / 运行本文件即可（重新）启动审核服务器；审核完直接关掉这个终端窗口即停止。'
-  printf 'cd "%s" || exit 1\n' "$REVIEW_DIR"
-  printf 'exec "%s" "%s" %s "%s"\n' "$NODE_BIN" "$SERVER_JS" "$PORT" "$MEDIA_INPUT"
+  printf 'cd %q || exit 1\n' "$REVIEW_DIR"
+  printf 'exec %q %q %q %q\n' "$NODE_BIN" "$SERVER_JS" "$PORT" "$MEDIA_INPUT"
 } > "$LAUNCHER"
 chmod +x "$LAUNCHER"
 
@@ -97,5 +102,7 @@ else
   echo "⚠️ 没能自动开启独立终端（环境可能禁止开新窗口）。"
   echo "   请手动打开一个终端，运行下面这条并【保持窗口开着】，然后访问 $URL ："
   echo
-  echo "      bash \"$LAUNCHER\""
+  printf '      bash '
+  print_shell_quote "$LAUNCHER"
+  printf '\n'
 fi

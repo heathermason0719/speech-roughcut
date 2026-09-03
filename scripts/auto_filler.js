@@ -47,7 +47,7 @@ for (let s = 0; s < map.length; s++) {
   const { startIdx, endIdx } = map[s];
   const seq = [];
   for (let i = startIdx; i <= endIdx; i++) {
-    if (!words[i].isGap) seq.push({ idx: i, c: words[i].text });
+    seq.push({ idx: i, c: words[i].text });
   }
   if (seq.length === 0) continue;
 
