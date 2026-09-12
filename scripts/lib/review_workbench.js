@@ -62,6 +62,8 @@
     let detectedSilence = [];
     let peaksData = null;
     let mediaContext = null;
+    let mediaCapabilityReady = false;
+    let mediaFailure = null;
     let editState = null;
     let compiledCutPlan = null;
     let planRevision = 0;
@@ -103,14 +105,28 @@
     };
     const formatSample = sample => formatSeconds(sample / sampleRate());
 
+    function setReviewInteractionEnabled(enabled) {
+      for (const node of document.querySelectorAll('.topbar, .workspace')) {
+        node.inert = !enabled;
+      }
+    }
+
     function failClosed(error) {
       api.error = error instanceof Error ? error.message : String(error);
       api.ready = false;
+      setReviewInteractionEnabled(false);
       exportButton.disabled = true;
       exportButton.title = api.error;
       loadingOverlay.classList.add('show');
       loadingLabel.textContent = '审核合同校验失败';
       loadingTime.textContent = api.error;
+    }
+
+    function failMedia(error) {
+      mediaFailure = error instanceof Error ? error.message : String(error);
+      mediaCapabilityReady = false;
+      player.pause();
+      failClosed(mediaFailure);
     }
 
     function ticksPerSecond(timebase) {
@@ -152,6 +168,7 @@
 
     function refreshPlan() {
       try {
+        if (!mediaCapabilityReady) throw new Error(mediaFailure || '浏览器媒体能力尚未验证');
         if (editState) detectedSilence = candidatesForThreshold(editState.policy.silenceThresholdDb);
         compiledCutPlan = CompileEdit.compileEdit({
           words,
@@ -251,7 +268,7 @@
       latchedCutId = null;
       pendingSeek = null;
       player.currentTime = reviewSampleToPlayerSeconds(previewRange.startSample);
-      if (play) player.play().catch(() => {});
+      if (play) player.play().catch(failMedia);
     }
 
     function endPreview() {
@@ -832,6 +849,7 @@
     }
 
     async function exportNow() {
+      if (!api.ready || !mediaCapabilityReady) throw new Error(mediaFailure || api.error || '浏览器媒体能力尚未验证');
       if (api.error || !compiledCutPlan) throw new Error(api.error || 'compiledCutPlan 尚未就绪');
       lastExportPayload = {
         compiledCutPlan,
@@ -880,7 +898,7 @@
       } catch (error) {
         api.lastExportError = error instanceof Error ? error.message : String(error);
         if (error && error.permanent === true) failClosed(error);
-        else {
+        else if (api.ready && mediaCapabilityReady) {
           exportButton.disabled = false;
           exportButton.title = `上次导出失败，可重试: ${api.lastExportError}`;
         }
@@ -951,7 +969,7 @@
         }, true);
         else {
           seekReviewSample(word.startSample);
-          player.play().catch(() => {});
+          player.play().catch(failMedia);
         }
       });
       content.addEventListener('dblclick', event => {
@@ -978,7 +996,7 @@
         if (!player.paused) startTick();
       });
       player.addEventListener('error', () => {
-        if (pendingSeek) failClosed(new Error('播放器 seek 失败'));
+        failMedia(root.ReviewMediaCapability.describeError(player));
       });
       canvas.addEventListener('click', event => {
         if (suppressWaveClick) {
@@ -1017,6 +1035,7 @@
       applyWaveTheme();
       root.addEventListener('resize', () => drawWave());
       document.addEventListener('keydown', event => {
+        if (!api.ready || !mediaCapabilityReady) return;
         if (event.target.tagName === 'INPUT' || event.target.tagName === 'SELECT') return;
         if ((event.metaKey || event.ctrlKey) && event.code === 'KeyZ') {
           event.preventDefault();
@@ -1038,7 +1057,7 @@
 
     async function initialize() {
       try {
-        if (!EditState || !CompileEdit || !SubtitleBlocks) {
+        if (!EditState || !CompileEdit || !SubtitleBlocks || !root.ReviewMediaCapability) {
           throw new Error('审核工作台共享模块未加载');
         }
         const fetchJson = async file => {
@@ -1070,6 +1089,10 @@
             || !Number.isFinite(playerOffset.seconds)) {
           throw new Error('playerPresentationOffset 未验证');
         }
+        loadingLabel.textContent = '检查浏览器媒体能力';
+        loadingTime.textContent = '正在验证媒体加载与定位，请稍候';
+        await root.ReviewMediaCapability.probe(player, { mediaContext });
+        mediaCapabilityReady = true;
         const initialThreshold = Number(document.getElementById('silenceThreshold').value);
         if (!data.silenceThresholds.map(Number).includes(initialThreshold)
             || allDetectedSilence.some(item => !data.silenceThresholds.map(Number).includes(Number(item.thresholdDb)))) {
@@ -1099,6 +1122,7 @@
         document.getElementById('fileSub').innerHTML = `REVIEW <span class="dot">●</span> ${editState.initialSuggestedWordDeletes.length} 处 AI 语言预选`;
         loadingOverlay.classList.remove('show');
         api.ready = true;
+        setReviewInteractionEnabled(true);
         updatePlayhead(0);
       } catch (error) {
         failClosed(error);
@@ -1106,8 +1130,9 @@
     }
 
     root.togglePlay = () => {
+      if (!api.ready || !mediaCapabilityReady) return;
       endPreview();
-      if (player.paused) player.play().catch(error => failClosed(error));
+      if (player.paused) player.play().catch(failMedia);
       else player.pause();
     };
     root.setSpeed = value => { player.playbackRate = Number(value); };

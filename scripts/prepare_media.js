@@ -3,6 +3,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { canonical, writerForDir } = require('./lib/invocation');
 const {
   buildMediaContext,
   MEDIA_CONTEXT_FILE,
@@ -19,12 +20,16 @@ const {
 async function prepareMedia(sourceArg, transcribeDirArg) {
   const sourcePath = path.resolve(sourceArg);
   const transcribeDir = path.resolve(transcribeDirArg);
+  const owner = writerForDir(transcribeDir, sourcePath);
+  const reviewPath = path.join(transcribeDir, REVIEW_AUDIO_FILE);
+  if (canonical(sourcePath) === canonical(reviewPath)) {
+    throw new Error('审核输出不能覆盖原始媒体，请选择独立的输出目录');
+  }
 
   // 所有硬性探测必须先于审核文件生成，保证不支持输入在任何上传或派生副作用前失败。
   const sourceMedia = probeMedia(sourcePath);
   fs.mkdirSync(transcribeDir, { recursive: true });
 
-  const reviewPath = path.join(transcribeDir, REVIEW_AUDIO_FILE);
   const temporaryReviewPath = path.join(
     transcribeDir,
     `.review_audio.${process.pid}.${Date.now()}.mp3`,
@@ -61,6 +66,7 @@ async function prepareMedia(sourceArg, transcribeDirArg) {
       sourceDecodedSampleCount,
       reviewDecodedSampleCount,
     });
+    if (owner) context.invocationId = owner.record.invocationId;
     writeMediaContext(path.join(transcribeDir, MEDIA_CONTEXT_FILE), context);
     console.error(`✅ 已生成统一审核音频: ${reviewPath}`);
     process.stdout.write(`${reviewPath}\n`);

@@ -9,9 +9,10 @@ const { buildFcpxml } = require('./lib/fcpxml');
 const { writeArtifactPair } = require('./lib/artifact_pair');
 const { buildLearningDiff, serializeLearningDiff } = require('./lib/learning_diff');
 const { loadAndVerifyMediaContext } = require('./lib/media_manifest');
+const { verifyReviewIdentity } = require('./lib/invocation');
 
 const PORT = process.argv[2] || 8899;
-const CONTEXT_FILE = process.argv[3];
+const CONTEXT_FILE = process.argv[3] && path.resolve(process.argv[3]);
 
 if (!CONTEXT_FILE) {
   console.error('❌ 错误: 必须指定 media_context.json');
@@ -54,6 +55,7 @@ const SHARED_LIBRARIES = new Map([
   ['/lib/compile_edit.js', 'compile_edit.js'],
   ['/lib/subtitle_blocks.js', 'subtitle_blocks.js'],
   ['/lib/review_workbench.js', 'review_workbench.js'],
+  ['/lib/review_media_capability.js', 'review_media_capability.js'],
 ]);
 
 function jsonResponse(response, status, payload) {
@@ -145,6 +147,7 @@ function sameSortedIds(left, right) {
 let initialReviewData;
 try {
   initialReviewData = readReviewData();
+  verifyReviewIdentity(CONTEXT_FILE, initialContext, initialReviewData);
   if (!isDeepStrictEqual(initialReviewData.mediaContext, initialContext)) {
     throw new Error('data.json 与 media_context.json 不属于同一 invocation');
   }
@@ -156,6 +159,7 @@ try {
 function verifyFrozenInvocation() {
   const currentContext = loadAndVerifyMediaContext(CONTEXT_FILE);
   const currentReviewData = readReviewData();
+  verifyReviewIdentity(CONTEXT_FILE, currentContext, currentReviewData);
   if (!isDeepStrictEqual(currentContext, initialContext)
       || !isDeepStrictEqual(currentReviewData, initialReviewData)) {
     throw new Error('当前 invocation 的 media context 或审核数据已变化');

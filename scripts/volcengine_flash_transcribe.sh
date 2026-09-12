@@ -28,6 +28,7 @@ if [ -z "$AUDIO_INPUT" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+node "$SCRIPT_DIR/lib/invocation.js" provider-write "$OUT_DIR" "$AUDIO_INPUT" || exit 1
 . "$SCRIPT_DIR/lib/load_api_key.sh"
 . "$SCRIPT_DIR/lib/volc_common.sh"
 

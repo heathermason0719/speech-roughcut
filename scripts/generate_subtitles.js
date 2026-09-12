@@ -4,6 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { deriveAsrBreaks, normalizeProviderWords } = require('./lib/transcript_model');
+const { bindTranscript, verifyResult } = require('./lib/invocation');
 
 function providerWords(result) {
   const utterances = result && result.result
@@ -46,12 +47,14 @@ function main(argv) {
   }
   const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
   const mediaContext = JSON.parse(fs.readFileSync(contextFile, 'utf8'));
+  verifyResult(resultFile, contextFile, mediaContext, outDir);
   const transcript = buildTranscript(result, mediaContext);
   fs.mkdirSync(outDir, { recursive: true });
   const wordsPath = path.join(outDir, 'subtitles_words.json');
   const breaksPath = path.join(outDir, 'asr_breaks.json');
   fs.writeFileSync(wordsPath, `${JSON.stringify(transcript.words, null, 2)}\n`);
   fs.writeFileSync(breaksPath, `${JSON.stringify(transcript.asrBreaks, null, 2)}\n`);
+  bindTranscript(outDir);
   console.log(`真实 words: ${transcript.words.length}`);
   console.log(`ASR breaks: ${transcript.asrBreaks.length}`);
   console.log(`✅ 已保存 ${wordsPath}`);

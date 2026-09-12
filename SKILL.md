@@ -16,9 +16,10 @@ description: 口播视频或音频转录和口误识别。生成审查稿和删�
 
 **模式 A（剪口播）：**
 ```
-~/Movies/ROUGHCUT-OutPut/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
+~/Movies/ROUGHCUT-OutPut/时间_媒体名_UUID/speech-roughcut/
+├── invocation.json   运行身份、状态与写入所有者
 ├── 1_转录/   media_context.json · review_audio.mp3 · volcengine_v3_result.json
-│              subtitles_words.json · asr_breaks.json
+│              subtitles_words.json · asr_breaks.json · result_identity.json · transcript_identity.json
 ├── 2_分析/   analysis.txt · sentence_map.json · speech_errors.json · auto_selected.json
 └── 3_审核/   review.html · data.json · peaks.json · detected_silence.json
                 <媒体名>_cut.fcpxml · learning_diff.json
@@ -27,9 +28,10 @@ description: 口播视频或音频转录和口误识别。生成审查稿和删�
 
 **模式 B（转字幕）：**
 ```
-~/Movies/ROUGHCUT-OutPut/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
+~/Movies/ROUGHCUT-OutPut/时间_媒体名_UUID/speech-roughcut/
+├── invocation.json   运行身份、状态与写入所有者
 ├── 1_转录/   media_context.json · review_audio.mp3 · volcengine_v3_result.json
-│              subtitles_words.json · asr_breaks.json · raw_text.txt
+│              subtitles_words.json · asr_breaks.json · result_identity.json · transcript_identity.json · raw_text.txt
 └── 2_纠错/   corrected.txt · uncertain.md（可选）
 媒体所在目录/
 └── subtitles_formatted.md   ← 最终输出
@@ -70,38 +72,40 @@ description: 口播视频或音频转录和口误识别。生成审查稿和删�
 > SKILL_DIR="<本 skill 的安装目录>"   # 例：Claude Code 默认 ~/.claude/skills/speech-roughcut
 > ```
 > API Key 的查找顺序见 [scripts/lib/load_api_key.sh](scripts/lib/load_api_key.sh)：
-> 环境变量 `VOLCENGINE_API_KEY` → `$SKILL_DIR/.env` →（兼容旧约定）上一级 `.env`。
+> 非空环境变量 `VOLCENGINE_API_KEY` → `VOLCENGINE_ENV_FILE` 指定的文件 → `$SKILL_DIR/.env` →（兼容旧约定）上一级 `.env`。doctor 与正式 shell 使用同一解析器：允许等号两侧空白及成对单双引号，保留值内部字节，不做变量、命令或注释展开；重复 key 明确拒绝。环境变量不 trim；占位值、换行等控制字符和非 ASCII key 拒绝。
 
 ### 步骤 -1: 首次引导（只在第一次跑）
 
-> **目的**：第一次用本 Skill 的人通常没装依赖、没配火山引擎 key。先做一次自检并手把手引导，配好后写标记文件，**以后永久跳过，不再打扰**。
+> **目的**：首次确认依赖、凭证及至少一个可用 ASR 资源，并保存可发现的能力。后续正式转录直接读取能力快照选路；用户变更凭证或资源、或执行失败时重新运行 doctor。
 
-**闸门**：先看标记文件是否存在（`SKILL_DIR` = 本 skill 安装目录，见上方「路径约定」）。
+**闸门**：检查是否有当前格式的能力快照（旧时间戳标记不代表已确认资源）。
 ```bash
 SKILL_DIR="<本 skill 的安装目录>"
-[ -f "$SKILL_DIR/.setup_done" ] && echo "已配置，跳过引导" || echo "需要引导"
+node -e 'const c=require(process.argv[1]).readSetupCapabilities(process.argv[2]); console.log(c ? c.join(" / ") : "需要引导"); process.exitCode=c ? 0 : 1' "$SKILL_DIR/scripts/lib/provider_config.js" "$SKILL_DIR"
 ```
-- 存在 `.setup_done` → **直接进入步骤 0**，不要跑自检、不要提引导。
-- 不存在 → 跑自检脚本（跨平台，Win/macOS/Linux 通用）：
+- 有能力快照且配置未变更 → 进入步骤 0。
+- 没有能力快照、只有旧时间戳标记或配置变更 → 跑自检脚本：
 
 ```bash
 node "$SKILL_DIR/scripts/doctor.js"
 ```
 
-`doctor.js` 做三层检查并输出人话报告：① 系统依赖（ffmpeg/node/python3/curl）② `VOLCENGINE_API_KEY`（环境变量或 `.env`，查找顺序见 `scripts/lib/load_api_key.sh`）③ 联网实测 key 与极速版/标准版两个资源是否开通。**全绿时它自己写 `.setup_done` 并退出 0**；有缺项退出 1。
+`doctor.js` 每次显式运行都检查当前事实：① ffmpeg/ffprobe/node/python3/curl 命令成功 ② 当前有效 key ③ 联网探测资源。依赖和 key 合法且至少一个资源通过时写 `.setup_done` 并退出 0，否则退出 1。`--json` 输出 `ready`、`availableEngines`、`recommendedEngine` 和 `recommendedFlag`；`--force` 保持兼容。历史标记不会让本次 doctor 跳过检查或假报 ready。
+
+探测只接受 HTTP 2xx 和明确业务成功：标准版 submit 为 `20000000`；极速版为 `20000000`，或固定有效静音 WAV 对应的 `20000003`（只表示静音探测已完成，不表示产出转录文本）。HTTP 503、缺少成功状态、排队或未知错误均不能成为可用证据。失败不自动删除历史能力快照，用户应先修复当前 doctor 失败再转录。
 
 **AI 按报告分情况引导用户**（不要让用户自己看懂报告）：
 1. **缺系统依赖** → 把报告里对应平台的安装命令复制给用户（脚本已按 Win/Mac 给好），让其装完。
 2. **缺 / 占位 API Key** → 按以下流程引导用户（火山引擎·豆包语音服务，共 40h 免费额度）：
    1. 登录控制台 https://console.volcengine.com/speech/new/overview
-   2. 左侧「语音识别」→ 开通「录音文件识别 1.0」，**标准版 + 极速版都开**（各 20h、共 ≈40h，独立抵扣）
+   2. 左侧「语音识别」→ 开通「录音文件识别 1.0」的标准版或极速版；任一资源可用即可完成 setup，两个都可用时保留 auto 轮换
    3. 左侧「API Key 管理」→ 复制 API Key
    4. 写入 `$SKILL_DIR/.env`（推荐，跟着 skill 走；也可 `export VOLCENGINE_API_KEY=...`）：
    ```bash
-   echo "VOLCENGINE_API_KEY=粘贴你的key" >> "$SKILL_DIR/.env"
+   # 在 .env 中保留唯一一条 VOLCENGINE_API_KEY=粘贴你的key，已有项应替换，不重复追加
    ```
-3. **某个资源未开通**（报告会精确指出是极速版还是标准版）→ 引导去控制台开通对应「录音文件识别 1.0」资源；默认 auto 轮流需两个都开（各 20h 免费、共 ≈40h），只想用一个就转录时加 `--flash` / `--v3-standard`。
-4. 用户修完 → **重跑 `node "$SKILL_DIR/scripts/doctor.js"`**，直到全绿（自动写 `.setup_done`），再进入步骤 0。
+3. **仅一个资源通过** → setup 已完成，按报告的明确参数执行；auto 也会固定使用唯一已确认资源。两个资源都通过时 auto 交替使用。两个都未确认时，按具体错误排查；未知错误不等同于未开通。
+4. 用户修完 → **重跑 `node "$SKILL_DIR/scripts/doctor.js"`**，直到依赖、key 和至少一个资源通过，再进入步骤 0。
 
 > 全程不要替用户去控制台点按钮或粘贴他的私有 key 到别处；只给清晰可复制的命令和链接。
 
@@ -111,7 +115,7 @@ node "$SKILL_DIR/scripts/doctor.js"
 
 ```
 🎙️ 媒体：/path/to/口播.wav
-📁 输出：~/Movies/ROUGHCUT-OutPut/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/
+📁 输出：~/Movies/ROUGHCUT-OutPut/时间_媒体名_UUID/speech-roughcut/
 
 请选择模式：
   [A] 剪口播 — 识别口误 → 网页审核 → 导出 FCPXML 给剪映 / FCP
@@ -123,6 +127,7 @@ node "$SKILL_DIR/scripts/doctor.js"
 **媒体硬闸门（任何网络调用之前执行）：**
 
 - 只接受 MP3、M4A、WAV，以及 CFR MP4/M4V/MOV；视频必须是 CFR，且素材恰好有一条主音轨。
+- MP3/M4A 的 `attached_pic` 封面不算主视频流；多个真正主视频流仍拒绝。
 - 当前只支持有效 presentation start 为 0、时间戳连续单调、播放速率为 1 的素材。
 - CFR 视频逐帧核对实际视频终点与主音轨终点；差值超过一帧时在生成审核文件前失败。
 - VFR 必须原样失败：`仅支持 CFR，请先转码为 CFR 后重新执行`。
@@ -135,24 +140,31 @@ node "$SKILL_DIR/scripts/doctor.js"
 ```bash
 SKILL_DIR="<本 skill 的安装目录>"   # 见上方「路径约定」
 MEDIA_PATH="/path/to/视频或音频"
-BASE_DIR="$HOME/Movies/ROUGHCUT-OutPut/$(date +%Y-%m-%d_%H-%M)_$(basename "$MEDIA_PATH" | sed 's/\.[^.]*$//')/speech-roughcut"
+BASE_DIR="$(node "$SKILL_DIR/scripts/lib/invocation.js" new-base "$MEDIA_PATH" "$HOME/Movies/ROUGHCUT-OutPut")/speech-roughcut"
 
 bash "$SKILL_DIR/scripts/run_transcribe.sh" "$MEDIA_PATH" "$BASE_DIR"
 # 输出: BASE_DIR/1_转录/{media_context.json, review_audio.mp3,
 #       volcengine_v3_result.json, subtitles_words.json, asr_breaks.json}
-# 每种正式输入都只上传统一规格的 review_audio.mp3；引擎兼容与额度判断也以该文件为准。
-# review_audio.mp3 若超过极速版的 2 小时或 100MB 上限，--auto 改走标准版；
+# 当前火山 provider 上传 review_audio.mp3；这是当前实现，不约束未来 provider 输入。
+# review_audio.mp3 若超过极速版的 2 小时或 100MB 上限，--auto 在标准版可用时切换；
 # 标准版超过 5 小时或 512MB 时会在上传前终止并说明原因。
 #
-# 默认引擎: auto 轮流（flash 极速版 auc_turbo ↔ 标准版 auc 交替）
-#   - 每次转录自动切换引擎，分摊两份各 20h 免费额度 ≈ 共 40h
+# 默认引擎: auto 读取 setup 能力；单资源固定，双资源交替
 #   - 单 X-Api-Key 认证，base64 直传，不依赖外部图床
-#   - 需在控制台同时开通极速版(auc_turbo)与标准版(auc)两个资源
+#   - 显式请求已知不可用的资源会及早拒绝；开通后重跑 doctor 更新能力
 #   - 限制: 音频 ≤ 2h、≤ 100MB
 # 可选引擎（只开了一个资源、或想固定用某个时加）:
 #   --flash        只用极速版（一次直出、最快）
 #   --v3-standard  只用标准版（异步 submit/query 轮询）
 ```
+
+正式调用为 `run_transcribe.sh <media> [BASE] [--auto|--flash|--v3-standard]`。一个 engine flag 可出现在任意位置；`--` 结束选项。未知 flag、多个 engine flag、多余位置参数会在创建产物前退出。媒体与输出路径支持相对路径，入口固定解析；`serve_review.sh` 也会在改变 cwd 前固定路径。不传 BASE 时在调用目录下自动生成 UUID 目录，并打印 `BASE_DIR=`。
+
+每个正式 BASE 由 `invocation.json` 独占并分配 UUID，记录 owner PID 和状态。已占用、已有阶段目录的 BASE 不接纳新的转录；成功、失败或中断后重试均分配新 BASE，不自动接管旧运行。`media_context.json` 与 result/words/breaks 的身份凭据共同约束归属，关键 JSON 内容变化或跨运行混用会在审核前拒绝。底层独立媒体工具可用于非正式临时目录，但不能绕过所有者写入正式 BASE。
+
+审核数据只生成到当前 `BASE/3_审核`，同一 invocation 的生成操作互斥；正常完成释放 `.review-writer.json`，异常退出可能保留锁并明确拒绝后续生成，不自动抢锁。审核服务校验 cwd、context、转录及 data 的归属。多审核 server 与 export revision 留待后续阶段。
+
+进入人工审核前，浏览器须通过媒体加载、画面解码（视频）及定位探测。纯音频检查统一 MP3；当前视频审核只对 H.264/AAC 组合尝试准入，其他编码明确拒绝。不支持、超时或后续解码错误会锁住审核与导出；该探测不证明全片播放、实际可听性或额外音画同步，不提供通用代理或自动转码。
 
 ### 步骤 5: 生成分析文件 + 口误识别
 

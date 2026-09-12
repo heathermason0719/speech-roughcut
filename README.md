@@ -41,7 +41,7 @@ agent 会读 README,自己把它装到本地 skills 目录、配好环境、跑�
 
 ![火山引擎豆包语音服务概览页](assets/volc-1-overview.png)
 
-**2. 点左侧「开通管理」→ 开通「录音文件识别 1.0」。标准版和极速版都开通**(各 20h、共 40h 免费额度,独立抵扣,完全够用)。
+**2. 点左侧「开通管理」→ 开通「录音文件识别 1.0」的标准版或极速版。任一资源可用即可完成 setup；两个都可用时保留 auto 轮换。**
 
 ![开通录音文件识别 1.0](assets/volc-2-enable.png)
 
@@ -72,11 +72,18 @@ export VOLCENGINE_API_KEY=粘贴你的key
   [B] 转字幕 — 转录 → 输出规范字幕文本(markdown,无时间戳)
 ```
 
-成品默认输出到 `~/Movies/ROUGHCUT-OutPut/YYYY-MM-DD_HH-MM_媒体名/speech-roughcut/` 下。
+Skill 工作流默认输出到 `~/Movies/ROUGHCUT-OutPut/时间_媒体名_UUID/speech-roughcut/`。每次正式运行有独立 UUID；已用 BASE 不会被新的转录复用，失败重试也使用新目录。
+
+正式脚本支持 `bash scripts/run_transcribe.sh <媒体> [BASE] [--auto|--flash|--v3-standard]`，flag 可在任意位置，`--` 结束选项；非法或重复 flag 及多余位置参数在创建输出前退出。不传 BASE 时自动在调用目录创建唯一目录，输出 `BASE_DIR=`。相对路径会在入口固定解析；审核 launcher 改变目录不会改变媒体和脚本指向。
+
+doctor 与正式转录共用配置解析：非空环境变量 → `VOLCENGINE_ENV_FILE` → skill `.env` → 上一级 `.env`。文件允许空白和成对引号，值内部字节保留，不展开变量或命令；重复 key、占位符与非法 key 明确拒绝。doctor 每次显式执行检查当前配置和服务，HTTP 失败、缺少成功业务状态或未知错误不报告 ready。固定静音探测的极速版 `20000003` 只表示探测处理完成。`.setup_done` 保存资源能力，`doctor.js --json` 提供推荐参数；auto 单资源固定、双资源轮换，不能因大小超限转入已知不可用资源。
+
+`invocation.json` 保留运行身份、状态和写入所有者；媒体 context、转录入口与 words/breaks 的归属在审核前校验。审核只写入当前 `BASE/3_审核`，生成时使用排他锁，异常遗留锁不会自动接管。详细步骤及产物说明见 [`SKILL.md`](SKILL.md)。
 
 ### 当前媒体与时间边界
 
 - 支持 MP3、M4A、WAV，以及 **CFR** 的 MP4、M4V、MOV；素材必须恰好有一条主音轨。
+- MP3/M4A 携带封面仍按音频处理，多个真正主视频流仍拒绝。浏览器审核另行检查加载、画面与定位能力；当前视频审核仅验证 H.264/AAC 组合，其他 codec、探测超时或解码失败会明确拒绝，不自动转码。
 - 当前仅支持有效 presentation start 为 0、时间戳连续单调且播放速率为 1 的素材。
 - CFR 视频的实际视频帧终点与主音轨终点必须在一帧容差内一致。
 - 检测到 VFR 时会在任何网络调用前停止，并提示：`仅支持 CFR，请先转码为 CFR 后重新执行`。
@@ -104,7 +111,7 @@ export VOLCENGINE_API_KEY=粘贴你的key
 ## 依赖要求
 
 - 一个支持 skill、有文件系统访问、能跑 shell 命令的 coding agent(不绑定特定工具)
-- `node` · `python3` · `ffmpeg` · `curl`(自检脚本 `doctor.js` 会按平台给安装命令)
+- `node` · `python3` · `ffmpeg` · `ffprobe` · `curl`(自检脚本 `doctor.js` 会按平台给安装命令)
 - 一个[火山引擎](https://console.volcengine.com/speech/new/overview)账号(语音转录用,有免费额度)
 
 想了解内部流程(步骤 0-8、两模式的脚本管线),看 [`SKILL.md`](SKILL.md) —— 它是整个 skill 的唯一入口和工作流地图。

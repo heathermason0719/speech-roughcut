@@ -122,9 +122,9 @@ function verifyAudioTimeline(filePath, sampleRate) {
   };
 }
 
-function readVideoFrameTimeline(filePath, frameSeconds) {
+function readVideoFrameTimeline(filePath, frameSeconds, streamIndex) {
   const raw = execFileSync('ffprobe', [
-    '-v', 'error', '-select_streams', 'v:0',
+    '-v', 'error', '-select_streams', String(streamIndex),
     '-show_frames',
     '-show_entries', 'frame=best_effort_timestamp_time,pkt_duration_time,duration_time',
     '-of', 'compact=p=0:nk=0', filePath,
@@ -178,7 +178,7 @@ function verifyCfr(filePath, videoStream) {
   if (Math.abs(startTime) > frameSeconds / 1000) {
     throw new Error(`视频 presentation start 必须为 0（检测到 ${startTime.toFixed(6)}s）`);
   }
-  const frameTimeline = readVideoFrameTimeline(filePath, frameSeconds);
+  const frameTimeline = readVideoFrameTimeline(filePath, frameSeconds, videoStream.index);
   return {
     fpsNum: rFrameRate.numerator,
     fpsDen: rFrameRate.denominator,
@@ -195,12 +195,13 @@ function probeMedia(filePath) {
   const extension = path.extname(resolved).slice(1).toLowerCase();
   const info = execJson('ffprobe', [
     '-v', 'error', '-show_entries',
-    'format=format_name:stream=index,codec_type,codec_name,sample_rate,channels,width,height,r_frame_rate,avg_frame_rate,time_base,start_time',
+    'format=format_name:stream=index,codec_type,codec_name,sample_rate,channels,width,height,r_frame_rate,avg_frame_rate,time_base,start_time:stream_disposition=attached_pic',
     '-of', 'json', resolved,
   ]);
   const streams = Array.isArray(info.streams) ? info.streams : [];
   const audioStreams = streams.filter(stream => stream.codec_type === 'audio');
-  const videoStreams = streams.filter(stream => stream.codec_type === 'video');
+  const videoStreams = streams.filter(stream => stream.codec_type === 'video'
+    && Number(stream.disposition && stream.disposition.attached_pic) !== 1);
   if (audioStreams.length !== 1) {
     throw new Error(`每次 invocation 只支持一个连续主音轨（检测到 ${audioStreams.length} 条音轨）`);
   }

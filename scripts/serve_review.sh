@@ -33,6 +33,11 @@ WANT_PORT="${4:-auto}"
 NODE_BIN="$(command -v node || true)"
 [ -n "$NODE_BIN" ] || { echo "❌ 找不到 node，请先安装"; exit 1; }
 
+# 在调用者 cwd 中固定路径，避免 launcher 的 cd 重新解释输入。
+REVIEW_DIR="$("$NODE_BIN" -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$REVIEW_DIR")"
+MEDIA_INPUT="$("$NODE_BIN" -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$MEDIA_INPUT")"
+SERVER_JS="$("$NODE_BIN" -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$SERVER_JS")"
+
 port_busy() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 print_shell_quote() {
   printf "'"
