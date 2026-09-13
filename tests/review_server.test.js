@@ -152,13 +152,13 @@ test('审核接口只接受当前 compiledCutPlan，并按开关序列化 output
   assert.match(xml, new RegExp(pathToFileURL(contract.source).href.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&')));
   assert.doesNotMatch(xml, /review_audio\.mp3/);
 
-  const learningPath = path.join(root, 'learning_diff.json');
+  const learningPath = path.join(root, 'exports', withTitles.json.revision, 'learning_diff.json');
   assert.equal(fs.realpathSync(withTitles.json.learningDiff), fs.realpathSync(learningPath));
   const learningDiff = parseLearningDiff(fs.readFileSync(learningPath, 'utf8'));
   assert.equal(learningDiff.mediaName, path.basename(contract.source));
   assert.deepEqual(learningDiff.aiOnly.map(item => item.wordId), ['word-000001']);
   assert.deepEqual(learningDiff.userOnly.map(item => item.wordId), ['word-000002']);
-  assert.equal(withTitles.json.downloadUrl, '/api/download/fcpxml');
+  assert.equal(withTitles.json.downloadUrl, `/api/download/fcpxml/${withTitles.json.revision}`);
   const download = await fetch(`http://127.0.0.1:${port}${withTitles.json.downloadUrl}`);
   assert.equal(download.status, 200);
   assert.equal(await download.text(), xml);

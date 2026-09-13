@@ -22,7 +22,7 @@ description: 口播视频或音频转录和口误识别。生成审查稿和删�
 │              subtitles_words.json · asr_breaks.json · result_identity.json · transcript_identity.json
 ├── 2_分析/   analysis.txt · sentence_map.json · speech_errors.json · auto_selected.json
 └── 3_审核/   review.html · data.json · peaks.json · detected_silence.json
-                <媒体名>_cut.fcpxml · learning_diff.json
+                exports/<revision>/<媒体名>_cut.fcpxml · learning_diff.json
                 ↑ 网页点击「导出 FCPXML」后生成；FCPXML 引用原始媒体资产
 ```
 
@@ -54,7 +54,7 @@ description: 口播视频或音频转录和口误识别。生成审查稿和删�
   6-7. 生成审核网页 + 启动服务器
   【等待用户确认】→ 网页点击「导出 FCPXML」→ 拖入剪映 / Final Cut Pro 完成剪辑
        （默认勾选「可编辑标题字幕」，导出时同步生成 Final Cut Pro Title）
-       （导出同时写 3_审核/learning_diff.json，供步骤 8 显式学习）
+       （导出同时写 3_审核/exports/<revision>/learning_diff.json，供步骤 8 显式学习）
   8. 自进化学习（用户显式触发「已导出，学一下」）→ diff 抽规则 → 确认 → 写 经验规则.md
 
 模式 B（转字幕）:
@@ -168,7 +168,7 @@ canonical `transcript.json` 的 version 1 只包含 `words` 与 `asrBreaks`，�
 
 独立 `volcengine_*_transcribe.sh <local_file_or_url> [output_dir]` 工具同样保存任务并拒绝覆盖既有结果；恢复需加 `--resume` 且保持原输入、目录和引擎。正式 BASE 必须使用统一入口恢复。这些工具只发布 raw，完整转录验收以正式入口为准。
 
-审核数据只生成到当前 `BASE/3_审核`，同一 invocation 的生成操作互斥；正常完成释放 `.review-writer.json`，异常退出可能保留锁并明确拒绝后续生成，不自动抢锁。审核服务校验 cwd、context、转录及 data 的归属。多审核 server 与 export revision 留待后续阶段。
+审核数据只生成到当前 `BASE/3_审核`，同一 invocation 的生成操作互斥；正常完成释放 `.review-writer.json`，异常退出可能保留锁并明确拒绝后续生成，不自动抢锁。审核服务校验 cwd、context、转录及 data 的归属，并在整个服务生命周期持有审核目录的 OS 排他锁；第二服务拒绝启动，所有者进程退出后锁自动释放，不另建项目身份。
 
 进入人工审核前，浏览器须通过媒体加载、画面解码（视频）及定位探测。纯音频检查统一 MP3；当前视频审核只对 H.264/AAC 组合尝试准入，其他编码明确拒绝。不支持、超时或后续解码错误会锁住审核与导出；该探测不证明全片播放、实际可听性或额外音画同步，不提供通用代理或自动转码。
 
@@ -298,9 +298,15 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 
 用户在网页中：播放片段确认 → 勾选/取消 → 点击「导出 FCPXML」→ 生成的 `*_cut.fcpxml` 拖入剪映或 Final Cut Pro 完成最终剪辑。工作台的播放跳段、波形、文字、标题预览和导出请求都引用同一次编译得到的整数 `compiledCutPlan`；服务端只校验并渲染，不重新计算剪辑语义、padding 或量化。
 
+PCM 恢复只撤销自动 PCM 静音删除理由，不抵消仍有效的词级内容删除或独立手工范围删除。PCM 标签可以撤销自己产生的手工删除标记；恢复范围在当前 invocation 内跨阈值/candidate 重算保留。撤销恢复只针对原决定，不按“最后操作”覆盖其它重叠决定；Title 跟随最终有效内容，learning 不从 PCM keep/cut 推断语言偏好。
+
+编辑先通过 state 转换与 plan 编译，再同步控件、波形、文字、标题和播放；失败保留上一次合法 state/plan，不消耗撤销记录。Cmd/Ctrl+Z 撤销，Cmd/Ctrl+Shift+Z 或 Ctrl+Y 重做，padding 控件也按恢复后的 state 同步。plan 更新清除旧播放 seek/preview 状态；播放检查短 cut 跨越。页面进入后台或离开时暂停媒体，返回前台不自动续播。
+
+每次导出使用独立 revision，完整写入后发布到 `3_审核/exports/<revision>/`。返回的 FCPXML、learning diff 路径和专属下载 URL 属于同一 revision；连续或并发请求互不覆盖，失败不会回滚其它成功版本。临时 I/O/下载错误允许当前合法 session 重试；身份、媒体、转录或冻结审核数据合同失效则 fail-closed。这不提供审核 autosave 或长期工程恢复。
+
 「可编辑标题字幕」默认勾选。开启时，服务器在导出阶段把已完成的字级转写转换成 Final Cut Pro 的 Basic Title：删除的词不进入字幕，字幕块不跨越剪辑断点；工作台已有短行保持不动，仅对超过 14 个中文字视觉宽度的长行拆分（ASCII 字符按半个中文字计宽，英文单词不从中间拆开）。关闭时不写 Title，保持原来的纯媒体 FCPXML 输出。
 
-> **导出时服务器同时写一份当前格式 `3_审核/learning_diff.json`**：只比较
+> **导出时服务器同时写一份当前格式 `3_审核/exports/<revision>/learning_diff.json`**：只比较
 > `initialSuggestedWordDeletes` 与最终真实 word 删除决定，记录 AI-only/user-only 的 word ID、文字和必要上下文。
 > ASR break、detected silence、阈值、padding 与 source/output ticks 均不进入该文件。它是本次 invocation 的临时交接物，不是可重开的工程。
 

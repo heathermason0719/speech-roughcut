@@ -217,15 +217,10 @@
     const paddingEndSamples = Math.max(0, Number(policy.silencePaddingEndSamples || 0));
     const currentDeleted = new Set(editState.currentDeletedWordIds || []);
     const restoredWordIds = new Set(editState.explicitlyRestoredWordIds || []);
-    const restoredSilenceIds = new Set(editState.explicitlyRestoredSilenceIds || []);
     const protectedWords = [...restoredWordIds].map(id => wordById.get(id)).filter(Boolean)
       .map(word => ({ startSample: word.startSample, endSample: word.endSample }));
     const protectedSilenceRanges = normalizeIntervals(
       editState.explicitlyRestoredSilenceRanges || [],
-      durationSamples,
-    );
-    const protectedIntervals = normalizeIntervals(
-      [...protectedWords, ...protectedSilenceRanges],
       durationSamples,
     );
     for (const id of currentDeleted) {
@@ -242,7 +237,6 @@
     const silenceDeletes = [];
     if (policy.autoSilenceEnabled !== false) {
       for (const silence of detectedSilence) {
-        if (restoredSilenceIds.has(String(silence.id))) continue;
         if (!Number.isInteger(silence.startSample) || !Number.isInteger(silence.endSample)
             || silence.endSample <= silence.startSample || !silence.energy
             || !Number.isFinite(silence.energy.maxDb)) {
@@ -255,20 +249,21 @@
         if (endSample > startSample) silenceDeletes.push({ startSample, endSample });
       }
     }
+    const effectiveSilenceDeletes = subtractIntervals(silenceDeletes, protectedSilenceRanges);
     let cuts = normalizeIntervals(
-      [...wordDeletes, ...manualDeletes, ...silenceDeletes],
+      [...wordDeletes, ...manualDeletes, ...effectiveSilenceDeletes],
       durationSamples,
       Number(policy.mergeGapSamples || 0),
     );
-    cuts = subtractIntervals(cuts, protectedIntervals);
+    cuts = subtractIntervals(cuts, protectedWords);
     let semanticKeeps = complement(cuts, 0, durationSamples);
     const minimumKeepSamples = Number(policy.minimumKeepSamples || 0);
     if (minimumKeepSamples > 1) {
       const disposable = semanticKeeps.filter(keep => keep.endSample - keep.startSample < minimumKeepSamples
-        && !protectedIntervals.some(protectedInterval => overlaps(keep, protectedInterval)));
+        && !protectedWords.some(protectedInterval => overlaps(keep, protectedInterval)));
       if (disposable.length) {
         cuts = normalizeIntervals([...cuts, ...disposable], durationSamples, Number(policy.mergeGapSamples || 0));
-        cuts = subtractIntervals(cuts, protectedIntervals);
+        cuts = subtractIntervals(cuts, protectedWords);
         semanticKeeps = complement(cuts, 0, durationSamples);
       }
     }

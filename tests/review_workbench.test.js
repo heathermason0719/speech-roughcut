@@ -137,7 +137,12 @@ async function openChrome(url, profileDir) {
 test('headless Chrome 工作台共用唯一 plan，验证空隙点击、配色切换与 seek 闸门', { timeout: 30000 }, async (t) => {
   assert.equal(fs.existsSync(CHROME), true);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-workbench-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let server, chrome;
+  t.after(async () => {
+    if (chrome) await chrome.close();
+    if (server) await stopChild(server);
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  });
   const source = makeMarkerWav(root, { duration: 1.5 });
   const transcribeDir = path.join(root, '1_转录');
   const reviewDir = path.join(root, '3_审核');
@@ -173,15 +178,13 @@ test('headless Chrome 工作台共用唯一 plan，验证空隙点击、配色�
   fs.writeFileSync(contextFile, `${JSON.stringify(data.mediaContext, null, 2)}\n`);
 
   const port = await freePort();
-  const server = spawn(process.execPath, [serverScript, String(port), contextFile], {
+  server = spawn(process.execPath, [serverScript, String(port), contextFile], {
     cwd: reviewDir,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  t.after(() => stopChild(server));
   await waitUntilReady(server);
 
-  const chrome = await openChrome(`http://127.0.0.1:${port}/`, path.join(root, 'chrome-profile'));
-  t.after(() => chrome.close());
+  chrome = await openChrome(`http://127.0.0.1:${port}/`, path.join(root, 'chrome-profile'));
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const state = await chrome.evaluate(`JSON.stringify({
       ready: !!window.__reviewTest?.ready,
@@ -220,6 +223,9 @@ test('headless Chrome 工作台共用唯一 plan，验证空隙点击、配色�
 
   await t.test('PCM 自动删除通过页面点击恢复，再点击重切，阈值切换与撤销保持一致', async () => {
     const result = await chrome.evaluate(`(() => {
+      // This scenario isolates automatic PCM; overlapping content deletion is
+      // tested separately under the Phase 3 reason-specific restore contract.
+      __reviewTest.dispatch({ type: 'RESTORE_WORD', wordId: 'word-000001' });
       const before = __reviewTest.getPlan();
       const node = [...document.querySelectorAll('[data-silence-id]')]
         .find(item => item.dataset.cutCoverage !== 'none');
@@ -233,7 +239,7 @@ test('headless Chrome 工作台共用唯一 plan，验证空隙点击、配色�
         state: __reviewTest.getEditState(),
         consumers: __reviewTest.getConsumerConsistency(),
       });
-      let actions = 0;
+      let actions = 1;
       try {
         node.click(); actions++;
         const restored = snapshot();
@@ -515,7 +521,8 @@ test('headless Chrome 工作台共用唯一 plan，验证空隙点击、配色�
   assert.deepEqual(transitions.undone.currentDeletedWordIds, ['word-000000', 'word-000001']);
   assert.equal(transitions.silenceRestored.explicitlyRestoredSilenceIds.includes(transitions.silenceId), true);
   assert.equal(transitions.silenceRestored.explicitlyRestoredSilenceRanges.length, 1);
-  assert.equal(transitions.restoredAcrossThreshold.audible, true);
+  // PCM restoration cannot revive the still-deleted content at this sample.
+  assert.equal(transitions.restoredAcrossThreshold.audible, false);
   assert.equal(transitions.restoredAcrossThreshold.state.policy.silenceThresholdDb, -30);
   assert.ok(transitions.restoredAcrossThreshold.ids.every(id => id.includes('m30')));
   assert.equal(transitions.thresholdUndo.state.policy.silenceThresholdDb, -35);

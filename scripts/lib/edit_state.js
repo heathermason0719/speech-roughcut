@@ -26,7 +26,11 @@
       if (!Number.isInteger(startSample) || !Number.isInteger(endSample) || endSample <= startSample) {
         throw new Error('manualDeleteRanges 必须使用有效整数 sample 边界');
       }
-      return { startSample, endSample };
+      return {
+        ...(range.sourceSilenceId == null ? {} : { sourceSilenceId: String(range.sourceSilenceId) }),
+        startSample,
+        endSample,
+      };
     }).sort((left, right) => left.startSample - right.startSample || left.endSample - right.endSample);
   }
 
@@ -35,15 +39,12 @@
       const normalized = normalizeRanges([range])[0];
       return {
         ...(range.silenceId == null ? {} : { silenceId: String(range.silenceId) }),
-        ...normalized,
+        startSample: normalized.startSample,
+        endSample: normalized.endSample,
       };
     }).sort((left, right) => left.startSample - right.startSample
       || left.endSample - right.endSample
       || String(left.silenceId || '').localeCompare(String(right.silenceId || '')));
-  }
-
-  function rangesOverlap(left, right) {
-    return left.startSample < right.endSample && left.endSample > right.startSample;
   }
 
   function createEditState(options = {}) {
@@ -95,22 +96,39 @@
       case 'UNDO_RESTORE_SILENCE': {
         const undoRange = normalizeSilenceRanges([action.range])[0];
         const removedIds = next.explicitlyRestoredSilenceRanges
-          .filter(range => rangesOverlap(range, undoRange))
+          .filter(range => range.silenceId === String(action.silenceId)
+            && range.startSample === undoRange.startSample
+            && range.endSample === undoRange.endSample)
           .map(range => range.silenceId)
           .filter(Boolean);
         next.explicitlyRestoredSilenceRanges = next.explicitlyRestoredSilenceRanges
-          .filter(range => !rangesOverlap(range, undoRange));
-        restoredSilence.delete(String(action.silenceId));
-        removedIds.forEach(id => restoredSilence.delete(id));
+          .filter(range => !(range.silenceId === String(action.silenceId)
+            && range.startSample === undoRange.startSample
+            && range.endSample === undoRange.endSample));
+        removedIds.forEach(id => {
+          if (!next.explicitlyRestoredSilenceRanges.some(range => range.silenceId === id)) {
+            restoredSilence.delete(id);
+          }
+        });
         break;
       }
       case 'ADD_MANUAL_DELETE_RANGE':
-        next.manualDeleteRanges = normalizeRanges([...next.manualDeleteRanges, action.range]);
+        next.manualDeleteRanges = normalizeRanges([...next.manualDeleteRanges, {
+          ...action.range,
+          ...(action.sourceSilenceId == null ? {} : { sourceSilenceId: action.sourceSilenceId }),
+        }]);
         break;
       case 'REMOVE_MANUAL_DELETE_RANGE': {
-        const target = normalizeRanges([action.range])[0];
+        const target = normalizeRanges([{
+          ...action.range,
+          ...(action.sourceSilenceId == null ? {} : { sourceSilenceId: action.sourceSilenceId }),
+        }])[0];
         next.manualDeleteRanges = next.manualDeleteRanges.filter(range => (
-          range.startSample !== target.startSample || range.endSample !== target.endSample
+          range.startSample !== target.startSample
+          || range.endSample !== target.endSample
+          || (target.sourceSilenceId == null
+            ? range.sourceSilenceId != null
+            : range.sourceSilenceId !== target.sourceSilenceId)
         ));
         break;
       }

@@ -51,7 +51,12 @@ test('静音只有确实生效后恢复才形成保护，人工范围保持独�
     type: 'UNDO_RESTORE_SILENCE', silenceId: 's2',
     range: { startSample: 50, endSample: 150 },
   });
-  assert.deepEqual(undone.explicitlyRestoredSilenceRanges, []);
+  assert.deepEqual(undone.explicitlyRestoredSilenceRanges, withRange.explicitlyRestoredSilenceRanges);
+  const exactUndo = edit.transitionEditState(undone, {
+    type: 'UNDO_RESTORE_SILENCE', silenceId: 's1',
+    range: { startSample: 100, endSample: 200 },
+  });
+  assert.deepEqual(exactUndo.explicitlyRestoredSilenceRanges, []);
 });
 
 test('手动删除范围可按同一整数 sample 边界移除且不影响其他范围', () => {

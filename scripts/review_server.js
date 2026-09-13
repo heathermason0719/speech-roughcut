@@ -2,17 +2,34 @@
 'use strict';
 
 const http = require('node:http');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { isDeepStrictEqual } = require('node:util');
 const { buildFcpxml } = require('./lib/fcpxml');
 const { writeArtifactPair } = require('./lib/artifact_pair');
+const { revisionFile, writeExportRevision } = require('./lib/export_revision');
 const { buildLearningDiff, serializeLearningDiff } = require('./lib/learning_diff');
 const { loadAndVerifyMediaContext } = require('./lib/media_manifest');
 const { verifyReviewIdentity } = require('./lib/invocation');
 
+const REVIEW_ROOT = path.resolve(process.cwd());
+if (process.env.SPEECH_ROUGHCUT_LOCKED_BASE !== REVIEW_ROOT) {
+  const child = spawn('python3', [path.join(__dirname, 'lib/run_locked.py'), REVIEW_ROOT,
+    process.execPath, __filename, ...process.argv.slice(2)], { stdio: 'inherit' });
+  for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => child.kill(signal));
+  child.once('exit', (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exitCode = code || 0;
+  });
+  return;
+}
+
 const PORT = process.argv[2] || 8899;
 const CONTEXT_FILE = process.argv[3] && path.resolve(process.argv[3]);
+if (process.env.SPEECH_ROUGHCUT_LOCK_SUPERVISOR_PID) {
+  console.log(`LOCK_WORKER_PID=${process.pid} LOCK_WORKER_PARENT_PID=${process.ppid}`);
+}
 
 if (!CONTEXT_FILE) {
   console.error('❌ 错误: 必须指定 media_context.json');
@@ -31,7 +48,6 @@ try {
 const PLAYBACK_FILE = initialContext.playbackPath;
 const EXPORT_FILE = initialContext.exportPath;
 const REVIEW_DATA_FILE = path.resolve(process.cwd(), 'data.json');
-let latestExportPath = null;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -73,7 +89,22 @@ function streamFile(response, filePath, request, contentType) {
     response.end('Not Found');
     return;
   }
-  const stat = fs.statSync(filePath);
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (_error) {
+    response.writeHead(503);
+    response.end('Temporarily Unavailable');
+    return;
+  }
+  const pipeStream = stream => stream.on('error', () => {
+    if (!response.headersSent) {
+      response.writeHead(503);
+      response.end('Temporarily Unavailable');
+    } else {
+      response.destroy();
+    }
+  }).pipe(response);
   if (request.headers.range) {
     const match = String(request.headers.range).match(/^bytes=(\d+)-(\d*)$/);
     if (!match) {
@@ -94,7 +125,7 @@ function streamFile(response, filePath, request, contentType) {
       'Accept-Ranges': 'bytes',
       'Content-Length': end - start + 1,
     });
-    fs.createReadStream(filePath, { start, end }).pipe(response);
+    pipeStream(fs.createReadStream(filePath, { start, end }));
     return;
   }
   response.writeHead(200, {
@@ -102,7 +133,7 @@ function streamFile(response, filePath, request, contentType) {
     'Content-Length': stat.size,
     'Accept-Ranges': 'bytes',
   });
-  fs.createReadStream(filePath).pipe(response);
+  pipeStream(fs.createReadStream(filePath));
 }
 
 function readJsonBody(request, maximumBytes = 8 * 1024 * 1024) {
@@ -157,14 +188,19 @@ try {
 }
 
 function verifyFrozenInvocation() {
-  const currentContext = loadAndVerifyMediaContext(CONTEXT_FILE);
-  const currentReviewData = readReviewData();
-  verifyReviewIdentity(CONTEXT_FILE, currentContext, currentReviewData);
-  if (!isDeepStrictEqual(currentContext, initialContext)
-      || !isDeepStrictEqual(currentReviewData, initialReviewData)) {
-    throw new Error('当前 invocation 的 media context 或审核数据已变化');
+  try {
+    const currentContext = loadAndVerifyMediaContext(CONTEXT_FILE);
+    const currentReviewData = readReviewData();
+    verifyReviewIdentity(CONTEXT_FILE, currentContext, currentReviewData);
+    if (!isDeepStrictEqual(currentContext, initialContext)
+        || !isDeepStrictEqual(currentReviewData, initialReviewData)) {
+      throw new Error('当前 invocation 的 media context 或审核数据已变化');
+    }
+    return { mediaContext: initialContext, reviewData: initialReviewData };
+  } catch (error) {
+    error.permanent = !error.code;
+    throw error;
   }
-  return { mediaContext: initialContext, reviewData: initialReviewData };
 }
 
 function originAllowed(request) {
@@ -211,62 +247,70 @@ const server = http.createServer(async (request, response) => {
         throw new Error('导出请求必须只提供 compiledCutPlan 与 includeTitles');
       }
       const { mediaContext: currentContext, reviewData } = verifyFrozenInvocation();
-      const result = buildFcpxml({
-        mediaContext: currentContext,
-        compiledCutPlan: payload.compiledCutPlan,
-        includeTitles: payload.includeTitles !== false,
-        outputDirectory: process.cwd(),
-      });
       if (!sameSortedIds(
         reviewData.initialSuggestedWordDeletes,
         payload.compiledCutPlan.wordDecisions.initialSuggestedWordDeleteIds,
       )) {
         throw new Error('compiledCutPlan 的 AI 初始词决定与 data.json 不一致');
       }
-      const learningDiff = buildLearningDiff({
-        mediaName: path.basename(currentContext.sourcePath),
-        words: reviewData.words,
-        initialSuggestedWordDeleteIds:
-          payload.compiledCutPlan.wordDecisions.initialSuggestedWordDeleteIds,
-        finalDeletedWordIds: payload.compiledCutPlan.wordDecisions.finalDeletedWordIds,
+      let result;
+      const exported = writeExportRevision(REVIEW_ROOT, (temporaryDirectory, finalDirectory) => {
+        result = buildFcpxml({
+          mediaContext: currentContext,
+          compiledCutPlan: payload.compiledCutPlan,
+          includeTitles: payload.includeTitles !== false,
+          outputDirectory: finalDirectory,
+        });
+        const learningDiff = buildLearningDiff({
+          mediaName: path.basename(currentContext.sourcePath),
+          words: reviewData.words,
+          initialSuggestedWordDeleteIds:
+            payload.compiledCutPlan.wordDecisions.initialSuggestedWordDeleteIds,
+          finalDeletedWordIds: payload.compiledCutPlan.wordDecisions.finalDeletedWordIds,
+        });
+        const learningDiffName = 'learning_diff.json';
+        writeArtifactPair([
+          { path: path.join(temporaryDirectory, path.basename(result.outputPath)), data: result.xml },
+          { path: path.join(temporaryDirectory, learningDiffName), data: serializeLearningDiff(learningDiff) },
+        ]);
+        return { fcpxmlName: path.basename(result.outputPath), learningDiffName };
       });
-      const learningDiffPath = path.resolve(process.cwd(), 'learning_diff.json');
-      writeArtifactPair([
-        { path: result.outputPath, data: result.xml },
-        { path: learningDiffPath, data: serializeLearningDiff(learningDiff) },
-      ]);
-      latestExportPath = result.outputPath;
-      console.log(`✅ 导出 FCPXML: ${result.outputPath} (${result.finalKeeps.length} 片段)`);
+      console.log(`✅ 导出 FCPXML: ${exported.outputPath} (${result.finalKeeps.length} 片段)`);
       jsonResponse(response, 200, {
         success: true,
-        output: result.outputPath,
-        downloadUrl: '/api/download/fcpxml',
-        learningDiff: learningDiffPath,
+        revision: exported.revision,
+        output: exported.outputPath,
+        downloadUrl: `/api/download/fcpxml/${exported.revision}`,
+        learningDiff: exported.learningDiffPath,
         segments: result.finalKeeps.length,
       });
     } catch (error) {
-      const fingerprintMismatch = /轻量指纹|invocation.*变化/.test(error.message);
       console.error(`❌ FCPXML 导出失败: ${error.message}`);
-      jsonResponse(response, fingerprintMismatch ? 409 : 400, {
+      const contractFailure = error.permanent === true;
+      const temporary = !contractFailure && Boolean(error.code);
+      jsonResponse(response, contractFailure ? 409 : (temporary ? 503 : 400), {
         success: false,
         error: error.message,
+        permanent: contractFailure,
       });
     }
     return;
   }
 
-  if (request.method === 'GET' && requestPath === '/api/download/fcpxml') {
-    if (!latestExportPath || !fs.existsSync(latestExportPath)) {
+  const downloadMatch = requestPath.match(/^\/api\/download\/fcpxml\/([^/]+)$/);
+  if (request.method === 'GET' && downloadMatch) {
+    const exportedPath = revisionFile(REVIEW_ROOT, downloadMatch[1], 'fcpxml');
+    if (!exportedPath || !fs.existsSync(exportedPath)) {
       response.writeHead(404);
       response.end('Not Found');
       return;
     }
-    const rawName = path.basename(latestExportPath);
+    const rawName = path.basename(exportedPath);
     response.setHeader(
       'Content-Disposition',
       `attachment; filename*=UTF-8''${encodeURIComponent(rawName)}`,
     );
-    streamFile(response, latestExportPath, request, 'application/octet-stream');
+    streamFile(response, exportedPath, request, 'application/octet-stream');
     return;
   }
 

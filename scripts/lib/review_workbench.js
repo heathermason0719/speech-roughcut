@@ -69,6 +69,8 @@
     let planRevision = 0;
     let lastExportPayload = null;
     let undoStack = [];
+    let redoStack = [];
+    let previousPlaybackSample = null;
     let previewRange = null;
     let latchedCutId = null;
     let pendingSeek = null;
@@ -114,6 +116,7 @@
     function failClosed(error) {
       api.error = error instanceof Error ? error.message : String(error);
       api.ready = false;
+      player.pause();
       setReviewInteractionEnabled(false);
       exportButton.disabled = true;
       exportButton.title = api.error;
@@ -166,62 +169,103 @@
       titlePreview.dataset.outputEndTick = block ? String(block.outputEndTick) : '';
     }
 
-    function refreshPlan() {
+    function syncControls() {
+      syncDetectedSilence();
+      const fps = mediaContext.timebase.kind === 'video-frames'
+        ? mediaContext.timebase.fpsNum / mediaContext.timebase.fpsDen : 30;
+      for (const [id, key] of [['padstart', 'silencePaddingStartSamples'], ['padend', 'silencePaddingEndSamples']]) {
+        const frames = editState.policy[key] / sampleRate() * fps;
+        document.getElementById(`knob-${id}`).value = String(frames);
+        document.getElementById(`knob-${id}-val`).textContent = `${frames} 帧`;
+      }
+    }
+
+    function resetPlaybackState() {
+      previewRange = null;
+      latchedCutId = null;
+      pendingSeek = null;
+      previousPlaybackSample = null;
+    }
+
+    function reportEditError(error) {
+      api.lastEditError = error instanceof Error ? error.message : String(error);
+      if (editState && mediaContext) syncControls();
+      exportButton.title = `编辑未应用: ${api.lastEditError}`;
+    }
+
+    function commitState(candidate, record = true, fatal = false) {
+      if (api.error && !fatal) return null;
+      const previous = { editState, detectedSilence, compiledCutPlan, planRevision };
       try {
         if (!mediaCapabilityReady) throw new Error(mediaFailure || '浏览器媒体能力尚未验证');
-        if (editState) detectedSilence = candidatesForThreshold(editState.policy.silenceThresholdDb);
-        compiledCutPlan = CompileEdit.compileEdit({
-          words,
-          asrBreaks,
-          detectedSilence,
-          editState,
-          mediaContext,
-        });
+        const nextState = EditState.createEditState(candidate);
+        const nextSilence = candidatesForThreshold(nextState.policy.silenceThresholdDb);
+        const nextPlan = CompileEdit.compileEdit({ words, asrBreaks, detectedSilence: nextSilence,
+          editState: nextState, mediaContext });
+        editState = nextState;
+        detectedSilence = nextSilence;
+        compiledCutPlan = nextPlan;
         planRevision += 1;
-        setConsumerPlan(compiledCutPlan);
-        api.error = null;
-        exportButton.disabled = false;
-        exportButton.title = '';
+        syncControls();
+        if (!previous.compiledCutPlan || Number(previous.editState.policy.silenceThresholdDb)
+            !== Number(nextState.policy.silenceThresholdDb)) renderTranscript();
+        setConsumerPlan(nextPlan);
         refreshSelectionStyles();
         drawWave();
         document.getElementById('tl-total').textContent = formatSample(durationSamples());
         document.getElementById('tl-final').textContent = formatSeconds(currentOutputSeconds());
         updateTitlePreview(playerSecondsToReviewSample(player.currentTime || playerOffsetSeconds()));
-        return compiledCutPlan;
+        if (record) { undoStack.push(clone(previous.editState)); if (undoStack.length > 100) undoStack.shift(); redoStack = []; }
+        resetPlaybackState();
+        if (!player.paused) processPlaybackSample(playerSecondsToReviewSample(player.currentTime));
+        api.lastEditError = null;
+        exportButton.disabled = false;
+        exportButton.title = '';
+        return nextPlan;
       } catch (error) {
-        failClosed(error);
+        editState = previous.editState;
+        detectedSilence = previous.detectedSilence;
+        compiledCutPlan = previous.compiledCutPlan;
+        planRevision = previous.planRevision;
+        if (compiledCutPlan) {
+          setConsumerPlan(compiledCutPlan);
+          renderTranscript();
+          drawWave();
+          updateTitlePreview(playerSecondsToReviewSample(player.currentTime || playerOffsetSeconds()));
+        }
+        if (fatal) failClosed(error); else reportEditError(error);
         return null;
       }
     }
 
-    function pushUndo() {
-      undoStack.push(clone(editState));
-      if (undoStack.length > 100) undoStack.shift();
-    }
+    function refreshPlan() { return commitState(editState, false, true); }
 
     function dispatch(action, record = true) {
-      if (record) pushUndo();
-      const previousThreshold = Number(editState.policy.silenceThresholdDb);
-      try {
-        editState = EditState.transitionEditState(editState, action);
-      } catch (error) {
-        failClosed(error);
-        throw error;
-      }
-      const thresholdChanged = Number(editState.policy.silenceThresholdDb) !== previousThreshold;
-      if (thresholdChanged) {
-        syncDetectedSilence();
-        renderTranscript();
-      }
-      return refreshPlan();
+      if (api.error) return null;
+      try { return commitState(EditState.transitionEditState(editState, action), record); }
+      catch (error) { reportEditError(error); return null; }
+    }
+
+    function dispatchBatch(actions, record = true) {
+      if (api.error) return null;
+      try { return commitState(actions.reduce((state, action) => EditState.transitionEditState(state, action), editState), record); }
+      catch (error) { reportEditError(error); return null; }
     }
 
     function undo() {
-      if (!undoStack.length) return compiledCutPlan;
-      editState = undoStack.pop();
-      syncDetectedSilence();
-      renderTranscript();
-      return refreshPlan();
+      if (api.error || !undoStack.length) return compiledCutPlan;
+      const before = clone(editState);
+      const result = commitState(undoStack[undoStack.length - 1], false);
+      if (result) { undoStack.pop(); redoStack.push(before); }
+      return result;
+    }
+
+    function redo() {
+      if (api.error || !redoStack.length) return compiledCutPlan;
+      const before = clone(editState);
+      const result = commitState(redoStack[redoStack.length - 1], false);
+      if (result) { redoStack.pop(); undoStack.push(before); }
+      return result;
     }
 
     function cutAtSample(sample) {
@@ -241,7 +285,11 @@
     function processPlaybackSample(sample, performSeek = true) {
       if (previewRange) return null;
       if (pendingSeek) return null;
-      const cut = cutAtSample(sample);
+      const lastSample = previousPlaybackSample;
+      previousPlaybackSample = sample;
+      const cut = cutAtSample(sample) || (lastSample !== null && sample > lastSample
+        ? compiledCutPlan.cuts.find(item => item.reviewStartSample > lastSample && item.reviewEndSample <= sample)
+        : null);
       if (!cut) {
         latchedCutId = null;
         return null;
@@ -249,6 +297,7 @@
       if (latchedCutId === cut.id) return null;
       latchedCutId = cut.id;
       pendingSeek = { cutId: cut.id, targetSample: cut.reviewEndSample };
+      previousPlaybackSample = cut.reviewEndSample;
       seekWrites[cut.id] = (seekWrites[cut.id] || 0) + 1;
       if (performSeek) player.currentTime = reviewSampleToPlayerSeconds(cut.reviewEndSample);
       return cut.reviewEndSample;
@@ -257,6 +306,7 @@
     function acknowledgePendingSeek() {
       const completed = pendingSeek;
       pendingSeek = null;
+      if (completed) previousPlaybackSample = completed.targetSample;
       return completed;
     }
 
@@ -272,9 +322,7 @@
     }
 
     function endPreview() {
-      previewRange = null;
-      latchedCutId = null;
-      pendingSeek = null;
+      resetPlaybackState();
     }
 
     function seekReviewSample(sample) {
@@ -342,9 +390,10 @@
       document.head.appendChild(style);
     }
 
-    function hasManualDeleteRange(range) {
+    function hasManualDeleteRange(range, sourceSilenceId = null) {
       return editState.manualDeleteRanges.some(item => (
         item.startSample === range.startSample && item.endSample === range.endSample
+        && (item.sourceSilenceId || null) === sourceSilenceId
       ));
     }
 
@@ -377,7 +426,7 @@
       chip.dataset.startSample = item.startSample;
       chip.dataset.endSample = item.endSample;
       chip.textContent = `PCM ${((item.endSample - item.startSample) / sampleRate()).toFixed(1)}s`;
-      chip.dataset.baseTitle = `PCM 能量证据 max ${item.energy.maxDb} dB；单击手动删除/恢复此空隙`;
+      chip.dataset.baseTitle = `PCM 能量证据 max ${item.energy.maxDb} dB；单击切换自动静音或该标签的删除，词级删除仍生效`;
       chip.title = chip.dataset.baseTitle;
       parent.appendChild(chip);
     }
@@ -449,7 +498,9 @@
       }
       for (const node of content.querySelectorAll('[data-asr-break-id], [data-silence-id]')) {
         const range = gapRange(node);
-        const manuallyDeleted = hasManualDeleteRange(range);
+        const manuallyDeleted = node.dataset.silenceId
+          ? editState.manualDeleteRanges.some(item => item.sourceSilenceId === node.dataset.silenceId)
+          : hasManualDeleteRange(range);
         const coverage = gapCutCoverage(range);
         node.dataset.cutCoverage = coverage;
         node.classList.toggle('selected', manuallyDeleted);
@@ -469,35 +520,21 @@
       const item = detectedSilence.find(candidate => String(candidate.id) === String(silenceId));
       if (!item) throw new Error(`未知 detectedSilence: ${silenceId}`);
       const range = { startSample: item.startSample, endSample: item.endSample };
-      const restored = isSilenceRestored(item);
-      if (restored) {
-        const plan = dispatch({
-          type: 'UNDO_RESTORE_SILENCE',
-          silenceId,
-          range,
-        });
-        // With automatic silence disabled there may be no underlying cut to
-        // reinstate. Keep a second click useful, as one undoable user action.
-        return gapCutCoverage(range) === 'none'
-          ? dispatch({ type: 'ADD_MANUAL_DELETE_RANGE', range }, false)
-          : plan;
+      const overlap = other => other.startSample < range.endSample && other.endSample > range.startSample;
+      const ownMarks = editState.manualDeleteRanges.filter(mark => mark.sourceSilenceId === String(silenceId));
+      const restoredRanges = editState.explicitlyRestoredSilenceRanges.filter(overlap);
+      const removals = ownMarks.map(mark => ({type: 'REMOVE_MANUAL_DELETE_RANGE', range: mark, sourceSilenceId: mark.sourceSilenceId}));
+      if (ownMarks.length || !isSilenceRestored(item) && gapCutCoverage(range) !== 'none') {
+        return dispatchBatch([...removals, {type: 'RESTORE_SILENCE', silenceId, range, wasEffective: true}]);
       }
-      if (gapCutCoverage(range) === 'none') {
-        return dispatch({ type: 'ADD_MANUAL_DELETE_RANGE', range });
+      if (isSilenceRestored(item)) {
+        const actions = restoredRanges.map(mark => ({type: 'UNDO_RESTORE_SILENCE', silenceId: mark.silenceId, range: mark}));
+        if (!actions.length) actions.push({type: 'UNDO_RESTORE_SILENCE', silenceId, range});
+        // Re-enable only this PCM reason. With auto PCM off, the chip creates its own manual mark.
+        if (editState.policy.autoSilenceEnabled === false) actions.push({type:'ADD_MANUAL_DELETE_RANGE', range, sourceSilenceId: String(silenceId)});
+        return dispatchBatch(actions);
       }
-      // Restore the effective cut, including overlapping automatic deletion.
-      // Remove an exact manual mark so the chip does not remain struck out.
-      pushUndo();
-      editState = EditState.transitionEditState(editState, {
-        type: 'REMOVE_MANUAL_DELETE_RANGE',
-        range,
-      });
-      return dispatch({
-        type: 'RESTORE_SILENCE',
-        silenceId,
-        range,
-        wasEffective: true,
-      }, false);
+      return dispatch({type: 'ADD_MANUAL_DELETE_RANGE', range, sourceSilenceId: String(silenceId)});
     }
 
     function candidatesForThreshold(value) {
@@ -523,36 +560,17 @@
 
     function setSilenceThresholdDb(value) {
       const threshold = Number(value);
-      if (!Number.isFinite(threshold)) throw new Error('静音阈值必须是有限 dB 数值');
-      pushUndo();
-      editState = EditState.transitionEditState(editState, {
-        type: 'SET_POLICY',
-        patch: { silenceThresholdDb: threshold },
-      });
-      syncDetectedSilence();
-      renderTranscript();
-      return refreshPlan();
+      if (!Number.isFinite(threshold)) { reportEditError(new Error('静音阈值必须是有限 dB 数值')); return null; }
+      return dispatch({ type: 'SET_POLICY', patch: { silenceThresholdDb: threshold } });
     }
 
     function clearAll() {
-      pushUndo();
-      const restoredWords = [...new Set([
-        ...editState.explicitlyRestoredWordIds,
-        ...editState.currentDeletedWordIds,
-      ])].sort();
-      editState = EditState.createEditState({
-        ...editState,
-        currentDeletedWordIds: [],
-        manualDeleteRanges: [],
-        explicitlyRestoredWordIds: restoredWords,
+      const restoredWords = [...new Set([...editState.explicitlyRestoredWordIds, ...editState.currentDeletedWordIds])].sort();
+      return commitState(EditState.createEditState({
+        ...editState, currentDeletedWordIds: [], manualDeleteRanges: [], explicitlyRestoredWordIds: restoredWords,
         explicitlyRestoredSilenceIds: allDetectedSilence.map(item => String(item.id)),
-        explicitlyRestoredSilenceRanges: allDetectedSilence.map(item => ({
-          silenceId: String(item.id),
-          startSample: item.startSample,
-          endSample: item.endSample,
-        })),
-      });
-      refreshPlan();
+        explicitlyRestoredSilenceRanges: allDetectedSilence.map(item => ({silenceId: String(item.id), startSample:item.startSample, endSample:item.endSample})),
+      }));
     }
 
     function drawBand(context, items, color, sampleToX, height) {
@@ -829,6 +847,7 @@
 
     function tick() {
       rafId = 0;
+      if (document.hidden || api.error) { player.pause(); return; }
       if (player.paused) return;
       const reviewSample = playerSecondsToReviewSample(player.currentTime);
       if (previewRange) {
@@ -845,7 +864,7 @@
     }
 
     function startTick() {
-      if (!rafId) rafId = root.requestAnimationFrame(tick);
+      if (!document.hidden && !rafId) rafId = root.requestAnimationFrame(tick);
     }
 
     async function exportNow() {
@@ -865,15 +884,16 @@
         result = await response.json();
       } catch (_error) {
         const failure = new Error(`导出服务返回无效响应: HTTP ${response.status}`);
-        failure.permanent = response.status >= 400 && response.status < 500;
+        failure.permanent = false;
         throw failure;
       }
       if (!response.ok || !result.success) {
         const failure = new Error(result.error || `HTTP ${response.status}`);
-        failure.permanent = response.status >= 400 && response.status < 500;
+        failure.permanent = result.permanent === true;
         throw failure;
       }
-      if (result.downloadUrl !== '/api/download/fcpxml') {
+      if (typeof result.revision !== 'string' || !/^[0-9a-f-]{36}$/.test(result.revision)
+          || result.downloadUrl !== `/api/download/fcpxml/${result.revision}`) {
         throw new Error('服务端未返回当前 FCPXML 下载地址');
       }
       const download = await fetch(result.downloadUrl);
@@ -928,10 +948,7 @@
         if (!pending.active && Math.hypot(event.clientX - pending.x, event.clientY - pending.y) < 4) return;
         const target = event.target.closest('[data-word-id]');
         if (!target) return;
-        if (!pending.active) {
-          pending.active = true;
-          pushUndo();
-        }
+        const record = !pending.active;
         const start = words.findIndex(word => word.id === pending.wordId);
         const end = words.findIndex(word => word.id === target.dataset.wordId);
         const low = Math.min(start, end);
@@ -943,9 +960,7 @@
             wordId: words[index].id,
           });
         }
-        editState = next;
-        refreshPlan();
-        suppressClick = true;
+        if (commitState(next, record)) { pending.active = true; suppressClick = true; }
       });
       document.addEventListener('mouseup', () => { pending = null; });
       content.addEventListener('click', event => {
@@ -982,7 +997,18 @@
     }
 
     function initControls() {
+      const pauseForBackground = () => {
+        if (!document.hidden) return;
+        player.pause();
+        if (rafId) root.cancelAnimationFrame(rafId);
+        rafId = 0;
+        resetPlaybackState();
+      };
+      document.addEventListener('visibilitychange', pauseForBackground);
+      root.addEventListener('pagehide', () => { player.pause(); resetPlaybackState(); });
       player.addEventListener('play', () => {
+        if (document.hidden || api.error) { player.pause(); return; }
+        processPlaybackSample(playerSecondsToReviewSample(player.currentTime));
         document.getElementById('playBtn').textContent = '❚❚ 暂停';
         startTick();
       });
@@ -990,8 +1016,10 @@
         document.getElementById('playBtn').textContent = '▶ 播放';
         updatePlayhead(playerSecondsToReviewSample(player.currentTime || playerOffsetSeconds()));
       });
+      player.addEventListener('seeking', () => { if (!pendingSeek) previousPlaybackSample = null; });
       player.addEventListener('seeked', () => {
         acknowledgePendingSeek();
+        previousPlaybackSample = playerSecondsToReviewSample(player.currentTime);
         updatePlayhead(playerSecondsToReviewSample(player.currentTime));
         if (!player.paused) startTick();
       });
@@ -1036,10 +1064,14 @@
       root.addEventListener('resize', () => drawWave());
       document.addEventListener('keydown', event => {
         if (!api.ready || !mediaCapabilityReady) return;
-        if (event.target.tagName === 'INPUT' || event.target.tagName === 'SELECT') return;
+        if (event.target.tagName === 'INPUT' && !['range', 'checkbox'].includes(event.target.type)) return;
         if ((event.metaKey || event.ctrlKey) && event.code === 'KeyZ') {
           event.preventDefault();
-          undo();
+          if (event.shiftKey) redo(); else undo();
+        } else if ((event.metaKey || event.ctrlKey) && event.code === 'KeyY') {
+          event.preventDefault(); redo();
+        } else if (event.target.tagName === 'INPUT' || event.target.tagName === 'SELECT') {
+          return;
         } else if (!event.metaKey && !event.ctrlKey && event.code === 'Space') {
           event.preventDefault();
           root.togglePlay();
@@ -1155,6 +1187,7 @@
       getMediaContext: () => clone(mediaContext),
       dispatch,
       undo,
+      redo,
       toggleSilence,
       setSilenceThresholdDb,
       isReviewSampleAudible,
@@ -1168,6 +1201,7 @@
         latchedCutId = null;
         pendingSeek = null;
         seekWrites = {};
+        previousPlaybackSample = null;
       },
       getSeekWrites: () => clone(seekWrites),
       getPendingSeek: () => clone(pendingSeek),
