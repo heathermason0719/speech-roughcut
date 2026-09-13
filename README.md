@@ -72,13 +72,15 @@ export VOLCENGINE_API_KEY=粘贴你的key
   [B] 转字幕 — 转录 → 输出规范字幕文本(markdown,无时间戳)
 ```
 
-Skill 工作流默认输出到 `~/Movies/ROUGHCUT-OutPut/时间_媒体名_UUID/speech-roughcut/`。每次正式运行有独立 UUID；已用 BASE 不会被新的转录复用，失败重试也使用新目录。
+Skill 工作流默认输出到 `~/Movies/ROUGHCUT-OutPut/时间_媒体名_UUID/speech-roughcut/`。每次正式新运行有独立 UUID；已用 BASE 不会被新的转录复用。恢复已有任务使用 `bash scripts/run_transcribe.sh --resume <BASE>`，不能同时更换媒体或引擎。
 
 正式脚本支持 `bash scripts/run_transcribe.sh <媒体> [BASE] [--auto|--flash|--v3-standard]`，flag 可在任意位置，`--` 结束选项；非法或重复 flag 及多余位置参数在创建输出前退出。不传 BASE 时自动在调用目录创建唯一目录，输出 `BASE_DIR=`。相对路径会在入口固定解析；审核 launcher 改变目录不会改变媒体和脚本指向。
 
 doctor 与正式转录共用配置解析：非空环境变量 → `VOLCENGINE_ENV_FILE` → skill `.env` → 上一级 `.env`。文件允许空白和成对引号，值内部字节保留，不展开变量或命令；重复 key、占位符与非法 key 明确拒绝。doctor 每次显式执行检查当前配置和服务，HTTP 失败、缺少成功业务状态或未知错误不报告 ready。固定静音探测的极速版 `20000003` 只表示探测处理完成。`.setup_done` 保存资源能力，`doctor.js --json` 提供推荐参数；auto 单资源固定、双资源轮换，不能因大小超限转入已知不可用资源。
 
 `invocation.json` 保留运行身份、状态和写入所有者；媒体 context、转录入口与 words/breaks 的归属在审核前校验。审核只写入当前 `BASE/3_审核`，生成时使用排他锁，异常遗留锁不会自动接管。详细步骤及产物说明见 [`SKILL.md`](SKILL.md)。
+
+异步任务先持久化请求 ID，再提交；超时、网络不确定或本地进程退出后，显式 resume 只查询原任务，不重复 submit。合法 raw result 保存在 `1_转录/.asr/`，本地处理失败后可无凭证重放。极速版结果不确定且没有 raw 时无法查询，必须由用户决定是否发起新 invocation。完整 canonical `transcript.json`、words/breaks、raw 和身份凭据一起发布；失败产物不进入审核，已有成功不覆盖。英文、混合语言的显示分隔附着于真实 timed word，不生成虚构时间；非空识别缺少可表达 words 会明确失败。
 
 ### 当前媒体与时间边界
 

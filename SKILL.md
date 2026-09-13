@@ -144,7 +144,7 @@ BASE_DIR="$(node "$SKILL_DIR/scripts/lib/invocation.js" new-base "$MEDIA_PATH" "
 
 bash "$SKILL_DIR/scripts/run_transcribe.sh" "$MEDIA_PATH" "$BASE_DIR"
 # 输出: BASE_DIR/1_转录/{media_context.json, review_audio.mp3,
-#       volcengine_v3_result.json, subtitles_words.json, asr_breaks.json}
+#       volcengine_v3_result.json, transcript.json, subtitles_words.json, asr_breaks.json}
 # 当前火山 provider 上传 review_audio.mp3；这是当前实现，不约束未来 provider 输入。
 # review_audio.mp3 若超过极速版的 2 小时或 100MB 上限，--auto 在标准版可用时切换；
 # 标准版超过 5 小时或 512MB 时会在上传前终止并说明原因。
@@ -160,7 +160,13 @@ bash "$SKILL_DIR/scripts/run_transcribe.sh" "$MEDIA_PATH" "$BASE_DIR"
 
 正式调用为 `run_transcribe.sh <media> [BASE] [--auto|--flash|--v3-standard]`。一个 engine flag 可出现在任意位置；`--` 结束选项。未知 flag、多个 engine flag、多余位置参数会在创建产物前退出。媒体与输出路径支持相对路径，入口固定解析；`serve_review.sh` 也会在改变 cwd 前固定路径。不传 BASE 时在调用目录下自动生成 UUID 目录，并打印 `BASE_DIR=`。
 
-每个正式 BASE 由 `invocation.json` 独占并分配 UUID，记录 owner PID 和状态。已占用、已有阶段目录的 BASE 不接纳新的转录；成功、失败或中断后重试均分配新 BASE，不自动接管旧运行。`media_context.json` 与 result/words/breaks 的身份凭据共同约束归属，关键 JSON 内容变化或跨运行混用会在审核前拒绝。底层独立媒体工具可用于非正式临时目录，但不能绕过所有者写入正式 BASE。
+每个正式 BASE 由 `invocation.json` 独占并分配 UUID，记录 owner PID、引擎和状态。已占用、已有阶段目录的 BASE 不接纳新的转录；普通新运行分配新 BASE。恢复必须显式执行 `bash "$SKILL_DIR/scripts/run_transcribe.sh" --resume "$BASE_DIR"`，不可同时指定媒体或引擎。入口持有进程锁，原所有者仍活动时拒绝并发恢复；退出后只接管当前 invocation。`media_context.json` 与 result/words/breaks 的身份凭据共同约束归属，媒体指纹变化或跨运行混用会在请求前或审核前拒绝。底层独立媒体工具可用于非正式临时目录，但不能绕过所有者写入正式 BASE。
+
+`1_转录/.asr/task.json` 在提交前保存 invocation、审核资产身份和请求 ID。标准异步任务本地超时、网络不确定或中断后，resume 继续 query 同一任务，不自动 submit；provider 明确失败保留失败记录。已取得并校验的 `.asr/raw_result.json` 与 canonical transcript 是不同阶段：normalization 或发布失败后，resume 只重放本地处理，无需有效 API Key。极速版没有可查询的异步任务；若结果不确定且无合法 raw，应报告并由用户决定是否使用新 BASE 再发起请求。不要把超时直接解释为远端失败，也不要替用户自动新建付费请求。
+
+canonical `transcript.json` 的 version 1 只包含 `words` 与 `asrBreaks`，使用审核 sample clock；provider schema 和任务状态只留在 adapter。显示空格、标点等无时间分隔附着于真实 word，不虚构时长。非空识别缺少可表达 words 或时间无效时明确失败。正式 raw、canonical、words/breaks 和身份凭据先写入 `.transcripts/` 的完整目录，再原子切换可见入口；只有完整校验的成功可进入审核。已成功 BASE 的 resume 只校验，不覆盖或重新识别。保留整个 BASE（包括隐藏目录与符号链接），不要单独搬动转录文件。
+
+独立 `volcengine_*_transcribe.sh <local_file_or_url> [output_dir]` 工具同样保存任务并拒绝覆盖既有结果；恢复需加 `--resume` 且保持原输入、目录和引擎。正式 BASE 必须使用统一入口恢复。这些工具只发布 raw，完整转录验收以正式入口为准。
 
 审核数据只生成到当前 `BASE/3_审核`，同一 invocation 的生成操作互斥；正常完成释放 `.review-writer.json`，异常退出可能保留锁并明确拒绝后续生成，不自动抢锁。审核服务校验 cwd、context、转录及 data 的归属。多审核 server 与 export revision 留待后续阶段。
 

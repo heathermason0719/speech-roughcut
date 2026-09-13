@@ -1,10 +1,11 @@
 'use strict';
 
-// Local ownership and minimum media/transcript binding, not a task checkpoint.
+// Local ownership and media/transcript binding. Provider task state lives separately.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { isDeepStrictEqual } = require('node:util');
+const { atomicWrite } = require('./atomic_file');
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 function writeJson(file, value, options) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, options);
@@ -68,7 +69,34 @@ function writerForDir(dir, source, credentials = process.env) {
 function finishInvocation(claim, state) {
   const current = readJson(claim.file);
   if (current.owner.token !== claim.record.owner.token) throw new Error('invocation 所有者变化');
-  writeJson(claim.file, { ...current, state });
+  const next = { ...current, state };
+  atomicWrite(claim.file, `${JSON.stringify(next, null, 2)}\n`);
+  claim.record = next;
+}
+function resumeInvocation(baseArg) {
+  const base = canonical(baseArg);
+  const file = path.join(base, 'invocation.json');
+  const record = readJson(file);
+  if (!record.invocationId || record.transcribeDir !== path.join(base, '1_转录')) {
+    throw new Error('resume 的 invocation 身份或 BASE 不匹配');
+  }
+  if (record.state === 'complete') return { file, record };
+  try {
+    process.kill(record.owner.pid, 0);
+    throw new Error('invocation 原写入所有者仍在运行，不能恢复');
+  } catch (error) {
+    if (error.code !== 'ESRCH') throw error;
+  }
+  const resumed = { ...record, state: 'running', owner: { pid: process.pid, token: crypto.randomUUID() } };
+  atomicWrite(file, `${JSON.stringify(resumed, null, 2)}\n`);
+  return { file, record: resumed };
+}
+function setInvocationEngine(claim, engine, requestedEngine) {
+  const current = readJson(claim.file);
+  if (current.owner.token !== claim.record.owner.token) throw new Error('invocation 所有者变化');
+  const next = { ...current, engine, requestedEngine };
+  atomicWrite(claim.file, `${JSON.stringify(next, null, 2)}\n`);
+  claim.record = next;
 }
 function verifyContextIdentity(contextFile, context, { complete = false } = {}) {
   const found = findRecord(contextFile);
@@ -126,8 +154,8 @@ function bindTranscript(dir) {
     asrBreaks: fileIdentity(path.join(dir, 'asr_breaks.json')),
   });
 }
-function verifyTranscript(contextFile, context, wordsFile, breaksFile) {
-  const found = verifyContextIdentity(contextFile, context, { complete: true });
+function verifyTranscript(contextFile, context, wordsFile, breaksFile, { allowIncomplete = false } = {}) {
+  const found = verifyContextIdentity(contextFile, context, { complete: !allowIncomplete });
   if (!found) {
     if (findRecord(wordsFile) || findRecord(breaksFile)) throw new Error('未绑定的 context 不能消费正式 invocation 转录');
     return null;
@@ -140,6 +168,15 @@ function verifyTranscript(contextFile, context, wordsFile, breaksFile) {
   verifyFile(path.join(found.record.transcribeDir, 'volcengine_v3_result.json'), identity.result);
   verifyFile(wordsFile, identity.words);
   verifyFile(breaksFile, identity.asrBreaks);
+  if (identity.canonical) {
+    const file = path.join(found.record.transcribeDir, 'transcript.json');
+    verifyFile(file, identity.canonical);
+    const transcript = require('./canonical_transcript').validateCanonicalTranscript(readJson(file), context);
+    if (!isDeepStrictEqual(transcript.words, readJson(wordsFile))
+        || !isDeepStrictEqual(transcript.asrBreaks, readJson(breaksFile))) {
+      throw new Error('canonical transcript 与正式字幕不一致');
+    }
+  }
   return identity;
 }
 function verifyReviewDirectory(contextFile, context, outDir) {
@@ -202,5 +239,6 @@ if (require.main === module) {
 }
 module.exports = {
   acquireReviewWriter, bindResult, bindTranscript, canonical, claimInvocation, finishInvocation, suggestedBase,
+  resumeInvocation, setInvocationEngine,
   verifyContextIdentity, verifyResult, verifyReviewIdentity, verifyTranscript, writerForDir,
 };
