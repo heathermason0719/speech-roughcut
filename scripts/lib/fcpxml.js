@@ -5,6 +5,8 @@ const { pathToFileURL } = require('node:url');
 const { validateCompiledCutPlan } = require('./compile_edit');
 
 const BASIC_TITLE_UID = '.../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti';
+const AUDIO_SEQUENCE_FPS = 30;
+const AUDIO_CARRIER_START_SECONDS = 3600n;
 
 function escapeXml(value) {
   return String(value).replace(/[&<>"']/g, character => ({
@@ -95,6 +97,35 @@ function sequenceAudioRateName(sampleRate) {
   return audioRateName(allowed.has(sampleRate) ? sampleRate : 48000);
 }
 
+function rationalTime(numerator, denominator) {
+  let a = numerator < 0n ? -numerator : numerator;
+  let b = denominator;
+  while (b) [a, b] = [b, a % b];
+  return `${numerator / a}/${denominator / a}s`;
+}
+
+// Audio and Titles are siblings under an integral-frame Primary Storyline gap.
+// Only Title endpoints and the enclosing carrier use the edit-frame grid.
+function audioTitleTimes(block, keep, timebase) {
+  const durationTick = block.outputEndTick - block.outputStartTick;
+  const rate = BigInt(timebase.ticksPerSecond);
+  const fps = BigInt(AUDIO_SEQUENCE_FPS);
+  const nearest = tick => (2n * BigInt(tick) * fps + rate) / (2n * rate);
+  const lower = (BigInt(keep.outputStartTick) * fps + rate - 1n) / rate;
+  const upper = BigInt(keep.outputEndTick) * fps / rate;
+  const bound = frame => frame < lower ? lower : frame > upper ? upper : frame;
+  const start = bound(nearest(block.outputStartTick));
+  const end = bound(nearest(block.outputEndTick));
+  if (end <= start) {
+    throw new Error(`Title ${block.id}（${block.text}）无法在所属保留片段内量化为正长度整帧；请调整该区间或关闭标题导出`);
+  }
+  return {
+    offset: rationalTime(AUDIO_CARRIER_START_SECONDS * fps + start, fps),
+    duration: (end - start) * rate === BigInt(durationTick) * fps
+      ? tickTime(durationTick, timebase) : rationalTime(end - start, fps),
+  };
+}
+
 function buildFcpxml({
   mediaContext,
   compiledCutPlan,
@@ -115,7 +146,7 @@ function buildFcpxml({
   const outputPath = path.resolve(outputDirectory, `${baseName}_cut.fcpxml`);
   const mediaUri = escapeXml(pathToFileURL(sourcePath).href);
   const outputUri = escapeXml(pathToFileURL(outputPath).href);
-  const frameDuration = isAudio ? '1/30s' : `${video.fpsDen}/${video.fpsNum}s`;
+  const frameDuration = isAudio ? `1/${AUDIO_SEQUENCE_FPS}s` : `${video.fpsDen}/${video.fpsNum}s`;
   const width = isAudio ? 1920 : video.width;
   const height = isAudio ? 1080 : video.height;
   const rateName = audioRateName(source.sampleRate);
@@ -128,13 +159,13 @@ function buildFcpxml({
     if (!titlesByKeep.has(block.keepIndex)) titlesByKeep.set(block.keepIndex, []);
     const text = escapeXml(block.text);
     const styleId = `ts${index + 1}`;
-    const durationTick = block.outputEndTick - block.outputStartTick;
     const keep = compiledCutPlan.keeps[block.keepIndex];
-    // Nested titles use the parent clip's local clock. Rebase the compiled
-    // output tick without changing its timeline position or quantizing again.
-    const offsetTick = keep.sourceStartTick + block.outputStartTick - keep.outputStartTick;
+    const timing = isAudio ? audioTitleTimes(block, keep, timebase) : {
+      offset: tickTime(keep.sourceStartTick + block.outputStartTick - keep.outputStartTick, timebase),
+      duration: tickTime(block.outputEndTick - block.outputStartTick, timebase),
+    };
     titlesByKeep.get(block.keepIndex).push(
-      `              <title name="${text}" lane="1" offset="${tickTime(offsetTick, timebase)}" ref="r3" start="0/1s" duration="${tickTime(durationTick, timebase)}">\n`
+      `              <title name="${text}" lane="1" offset="${timing.offset}" ref="r3" start="0/1s" duration="${timing.duration}">\n`
       + `                <text><text-style ref="${styleId}">${text}</text-style></text>\n`
       + `                <text-style-def id="${styleId}"><text-style font="PingFang SC" fontSize="64" fontFace="Regular" fontColor="1 1 1 1" alignment="center">${text}</text-style></text-style-def>\n`
       + '                <adjust-transform position="0 -35" />\n'
@@ -145,7 +176,11 @@ function buildFcpxml({
   const clips = compiledCutPlan.keeps.map((keep, keepIndex) => {
     const durationTick = keep.sourceEndTick - keep.sourceStartTick;
     const mediaAttrs = isAudio ? ' srcEnable="audio"' : ' format="r2"';
-    const open = `            <asset-clip name="${escapedBaseName}" offset="${tickTime(keep.outputStartTick, timebase)}" ref="r1" start="${tickTime(keep.sourceStartTick, timebase)}" duration="${tickTime(durationTick, timebase)}"${mediaAttrs} audioRole="dialogue" tcFormat="NDF"`;
+    const offset = isAudio
+      ? `${AUDIO_CARRIER_START_SECONDS * BigInt(timebase.ticksPerSecond) + BigInt(keep.outputStartTick)}/${timebase.ticksPerSecond}s`
+      : tickTime(keep.outputStartTick, timebase);
+    const open = `            <asset-clip name="${escapedBaseName}" offset="${offset}" ref="r1" start="${tickTime(keep.sourceStartTick, timebase)}" duration="${tickTime(durationTick, timebase)}"${mediaAttrs} audioRole="dialogue" tcFormat="NDF"`;
+    if (isAudio) return `${open} lane="-1" />`;
     const titles = titlesByKeep.get(keepIndex) || [];
     return titles.length
       ? `${open}>\n${titles.join('\n')}\n            </asset-clip>`
@@ -154,6 +189,14 @@ function buildFcpxml({
   const totalOutputTick = compiledCutPlan.keeps.length
     ? compiledCutPlan.keeps[compiledCutPlan.keeps.length - 1].outputEndTick
     : 0;
+  const carrierFrames = isAudio
+    ? (BigInt(totalOutputTick) * BigInt(AUDIO_SEQUENCE_FPS) + BigInt(timebase.ticksPerSecond) - 1n) / BigInt(timebase.ticksPerSecond)
+    : null;
+  // Ceiling adds only an accepted, sub-frame silent tail; audio samples never move.
+  const sequenceDuration = isAudio ? `${carrierFrames}/${AUDIO_SEQUENCE_FPS}s` : tickTime(totalOutputTick, timebase);
+  const spine = isAudio
+    ? `            <gap name="Primary Storyline carrier" offset="0s" start="${AUDIO_CARRIER_START_SECONDS}s" duration="${sequenceDuration}">\n${clips}\n${[...titlesByKeep.values()].flat().join('\n')}\n            </gap>`
+    : clips;
   const assetFormat = isAudio ? '' : ' format="r2"';
   const sequenceFormat = ' format="r2"';
   const audioLayout = source.channels === 1 ? 'mono' : (source.channels === 2 ? 'stereo' : 'surround');
@@ -168,9 +211,9 @@ function buildFcpxml({
   <library location="${outputUri}">
     <event name="${escapedBaseName}_剪辑" uid="${uuid()}">
       <project name="${escapedBaseName}_cut" uid="${uuid()}">
-        <sequence duration="${tickTime(totalOutputTick, timebase)}"${sequenceFormat} tcStart="0/1s" tcFormat="NDF" audioLayout="${audioLayout}" audioRate="${sequenceRateName}">
+        <sequence duration="${sequenceDuration}"${sequenceFormat} tcStart="0/1s" tcFormat="NDF" audioLayout="${audioLayout}" audioRate="${sequenceRateName}">
           <spine>
-${clips}
+${spine}
           </spine>
         </sequence>
       </project>

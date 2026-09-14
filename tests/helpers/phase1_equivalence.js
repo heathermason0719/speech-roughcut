@@ -107,4 +107,89 @@ async function captureSnapshot(checkoutRoot, source, outputRoot) {
   };
 }
 
-module.exports = { captureSnapshot };
+// Compare the frozen semantic snapshots unchanged. For audio exports only,
+// validate the FCP-proven carrier contract, then compare the unchanged XML
+// payload after projecting both layouts into the same source/output clocks.
+function assertSnapshotTimeEquivalent(current, baseline) {
+  const normalized = structuredClone(current);
+  const expected = structuredClone(baseline);
+  if (current.data.mediaContext.timebase.kind === 'audio-samples') {
+    const attrs = text => Object.fromEntries([...text.matchAll(/([\w-]+)="([^"]*)"/g)].map(m => [m[1], m[2]]));
+    const fraction = text => text.slice(0, -1).split('/').map(BigInt);
+    const ticks = (text, rate) => {
+      const [n, d = 1n] = fraction(text);
+      assert.equal(n * BigInt(rate) % d, 0n, `not exact ticks: ${text}`);
+      return n * BigInt(rate) / d;
+    };
+    const compact = xml => xml.replace(/>\s+</g, '><').trim();
+    for (const [name, scenario] of Object.entries(current.scenarios)) {
+      const plan = scenario.compiledCutPlan, rate = plan.timebase.ticksPerSecond;
+      const total = BigInt(plan.keeps.at(-1)?.outputEndTick || 0);
+      const frameCount = (total * 30n + BigInt(rate) - 1n) / BigInt(rate);
+      for (const key of ['withoutTitles', 'withTitles']) {
+        function project(output, connected) {
+          const xml = output.xml;
+          const sequence = attrs(xml.match(/<sequence\b([^>]*)>/)[1]);
+          const gap = xml.match(/<gap\b([^>]*)>([\s\S]*?)<\/gap>/);
+          let origin = 0n;
+          if (connected) {
+            assert.ok(gap, 'audio requires a single Primary Storyline carrier');
+            assert.equal((xml.match(/<gap /g) || []).length, 1);
+            const ga = attrs(gap[1]);
+            assert.equal(ga.start, '3600s');
+            assert.equal(ticks(ga.offset, rate), 0n);
+            assert.equal(ticks(ga.duration, 30), frameCount);
+            assert.equal(ticks(sequence.duration, 30), frameCount);
+            origin = 3600n * BigInt(rate);
+            assert.doesNotMatch(gap[2], /<\/asset-clip>/, 'Titles must be siblings of audio');
+          } else {
+            assert.equal(gap, null);
+            assert.equal(ticks(sequence.duration, rate), total);
+          }
+          const clips = [...xml.matchAll(/<asset-clip\b([^>]*)>/g)].map(m => attrs(m[1]));
+          assert.equal(clips.length, plan.keeps.length);
+          clips.forEach((c, i) => {
+            const k = plan.keeps[i];
+            assert.equal(ticks(c.start, rate), BigInt(k.sourceStartTick));
+            assert.equal(ticks(c.duration, rate), BigInt(k.sourceEndTick - k.sourceStartTick));
+            assert.equal(ticks(c.offset, rate) - origin, BigInt(k.outputStartTick));
+            if (connected) { assert.equal(c.lane, '-1'); delete c.lane; }
+            c.offset = `${k.outputStartTick}/${rate}s`;
+          });
+          const blocks = [...xml.matchAll(/<title\b([^>]*)>[\s\S]*?<\/title>/g)];
+          assert.equal(blocks.length, key === 'withTitles' ? plan.titleBlocks.length : 0);
+          const titles = blocks.map((m, i) => {
+            const a = attrs(m[1]), block = plan.titleBlocks[i], keep = plan.keeps[block.keepIndex];
+            if (connected) {
+              const first = ticks(a.offset, 30) - 108000n;
+              const duration = ticks(a.duration, 30);
+              assert.ok(duration > 0n);
+              const last = first + duration;
+              assert.ok(first * BigInt(rate) >= BigInt(keep.outputStartTick) * 30n);
+              assert.ok(last * BigInt(rate) <= BigInt(keep.outputEndTick) * 30n);
+              for (const [frame, tick] of [[first, block.outputStartTick], [last, block.outputEndTick]]) {
+                const delta = frame * BigInt(rate) - BigInt(tick) * 30n;
+                assert.ok((delta < 0n ? -delta : delta) < BigInt(rate));
+              }
+            } else {
+              assert.equal(ticks(a.offset, rate), BigInt(keep.sourceStartTick + block.outputStartTick - keep.outputStartTick));
+              assert.equal(ticks(a.duration, rate), BigInt(block.outputEndTick - block.outputStartTick));
+            }
+            return compact(m[0].replace(/^<title\b[^>]*>/, tag =>
+              tag.replace(/\b(offset|duration)="[^"]*"/g, '$1="<accepted-title-grid>"')));
+          });
+          // All resources, media metadata, sequence attributes other than the
+          // accepted carrier duration, and every Title payload remain equal.
+          const skeleton = compact(xml.replace(/<spine>[\s\S]*?<\/spine>/, '<spine/>')
+            .replace(/<sequence\b[^>]*>/, tag => tag.replace(/duration="[^"]*"/, 'duration="<accepted-carrier>"')));
+          return { skeleton, clips, titles };
+        }
+        normalized.scenarios[name].exports[key] = project(scenario.exports[key], true);
+        expected.scenarios[name].exports[key] = project(baseline.scenarios[name].exports[key], false);
+      }
+    }
+  }
+  assert.deepEqual(normalized, expected);
+}
+
+module.exports = { captureSnapshot, assertSnapshotTimeEquivalent };

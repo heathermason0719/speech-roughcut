@@ -7,14 +7,14 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { makeCfrVideo, writeMonoWav } = require('./helpers/media_fixtures');
-const { captureSnapshot } = require('./helpers/phase1_equivalence');
+const { captureSnapshot, assertSnapshotTimeEquivalent } = require('./helpers/phase1_equivalence');
 
 // Capture both revisions with one ffmpeg installation and the exact same source
 // bytes. A pinned Git archive prevents working-tree edits from changing the oracle.
 const BASELINE_REVISION = '94db7762a1cd5c17d5ff827989c5f2fd313f5abd';
 const repositoryRoot = path.resolve(__dirname, '..');
 
-test('Phase 1 对同一 WAV/CFR 输入保持基线全部时间数字、唯一 plan 与 FCPXML 时间', async t => {
+test('Phase 1 基线时间与 plan 保持，仅允许已验证的音频 carrier 结构与 Title 帧格', async t => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-phase1-equivalence-'));
   t.after(() => fs.rmSync(temporaryRoot, { recursive: true, force: true }));
   const baselineRoot = path.join(temporaryRoot, 'baseline');
@@ -49,8 +49,8 @@ test('Phase 1 对同一 WAV/CFR 输入保持基线全部时间数字、唯一 pl
       const baseline = await captureSnapshot(baselineRoot, source, path.join(mediaRoot, 'before'));
       const current = await captureSnapshot(repositoryRoot, source, path.join(mediaRoot, 'after'));
       assert.deepEqual(fs.readFileSync(source), sourceBefore, '两次运行不得修改共同的原始媒体');
-      assert.deepEqual(current, baseline);
-      t.diagnostic(`${kind}: 4 edit states, 8 FCPXML exports; media/ASR/PCM/plan/title times exactly equal`);
+      assertSnapshotTimeEquivalent(current, baseline);
+      t.diagnostic(`${kind}: media/ASR/PCM/plan exact; audio sample times exact across carrier rebasing; accepted carrier tail and Title frame grid only`);
     });
   }
 });

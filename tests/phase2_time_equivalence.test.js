@@ -6,9 +6,9 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { makeAudio, makeCfrVideo } = require('./helpers/media_fixtures');
-const { captureSnapshot } = require('./helpers/phase1_equivalence');
+const { captureSnapshot, assertSnapshotTimeEquivalent } = require('./helpers/phase1_equivalence');
 
-test('Phase 2 与已验收 Phase 1 HEAD 的 WAV/CFR 时间、PCM、plan、Title、FCPXML 数字完全一致', async t => {
+test('Phase 2 基线时间与 plan 保持，仅允许已验证的音频 carrier 结构与 Title 帧格', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-phase2-equivalence-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const project = path.resolve(__dirname, '..');
@@ -23,8 +23,8 @@ test('Phase 2 与已验收 Phase 1 HEAD 的 WAV/CFR 时间、PCM、plan、Title�
       const source = kind === 'wav' ? makeAudio(dir, 'wav', options) : makeCfrVideo(dir, 'mp4', options);
       const before = await captureSnapshot(baseline, source, path.join(dir, 'before'));
       const after = await captureSnapshot(project, source, path.join(dir, 'after'));
-      assert.deepEqual(after, before);
-      t.diagnostic(`${kind}: four edit states and eight FCPXML exports exactly equal to Phase 1`);
+      assertSnapshotTimeEquivalent(after, before);
+      t.diagnostic(`${kind}: Phase 1 media/ASR/PCM/plan exact; only rendered audio Title times may change`);
     });
   }
 });

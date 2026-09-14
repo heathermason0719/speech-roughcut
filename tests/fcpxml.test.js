@@ -111,7 +111,7 @@ for (const [kind, makeContract] of [['audio', audioContract], ['video', videoCon
   }
 }
 
-test('纯音频 renderer 保持媒体 ticks，并用父片段本地坐标挂载 Title', (t) => {
+test('纯音频 renderer 保持媒体 ticks，并将音频和 Title 连接到 carrier', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-roughcut-fcpxml-plan-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = path.join(root, '原始 语音.wav');
@@ -125,10 +125,10 @@ test('纯音频 renderer 保持媒体 ticks，并用父片段本地坐标挂载 
 
   assert.equal(finalKeeps, contract.compiledCutPlan.keeps);
   assert.match(xml, /<asset [^>]*hasAudio="1"[^>]*hasVideo="0"[^>]*audioChannels="1"[^>]*audioRate="44\.1k"/);
-  assert.match(xml, /<asset-clip [^>]*offset="0\/44100s"[^>]*start="0\/44100s"[^>]*duration="44100\/44100s"/);
-  assert.match(xml, /<asset-clip [^>]*offset="44100\/44100s"[^>]*start="88200\/44100s"[^>]*duration="88200\/44100s"/);
-  assert.match(xml, /<sequence duration="132300\/44100s"/);
-  assert.match(xml, /<title [^>]*offset="97020\/44100s"[^>]*duration="26460\/44100s"/);
+  assert.match(xml, /<asset-clip [^>]*offset="158760000\/44100s"[^>]*start="0\/44100s"[^>]*duration="44100\/44100s"/);
+  assert.match(xml, /<asset-clip [^>]*offset="158804100\/44100s"[^>]*start="88200\/44100s"[^>]*duration="88200\/44100s"/);
+  assert.match(xml, /<sequence duration="90\/30s"/);
+  assert.match(xml, /<title [^>]*offset="18006\/5s"[^>]*duration="26460\/44100s"/);
   assert.match(xml, new RegExp(pathToFileURL(source).href.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&')));
   assert.doesNotMatch(xml, /review_audio\.mp3/);
   const xmlFile = path.join(root, 'parse.xml');
@@ -172,7 +172,7 @@ test('CFR 视频 renderer 保持 frame ticks，嵌套 Title 换算回工程后�
   }
 });
 
-test('非零 source start 的首段字幕正确挂载，音频和字幕不额外吸附视频帧', () => {
+test('非零 source start 的音频保持 sample，首段字幕使用 carrier 本地坐标', () => {
   const contract = audioContract('/tmp/speech-roughcut-subframe.wav');
   const plan = contract.compiledCutPlan;
   plan.keeps = [{
@@ -194,14 +194,12 @@ test('非零 source start 的首段字幕正确挂载，音频和字幕不额外
   const before = structuredClone(plan);
   const { xml } = buildFcpxml(contract);
   const clip = xml.match(/<asset-clip [^>]*offset="(\d+)\/44100s"[^>]*start="(\d+)\/44100s"[^>]*duration="(\d+)\/44100s"/);
-  const title = xml.match(/<title [^>]*offset="(\d+)\/44100s"[^>]*duration="(\d+)\/44100s"/);
-
-  assert.deepEqual(clip.slice(1).map(Number), [0, 52921, 35280]);
-  // FCPXML nested offset is in the parent's local timeline, not the sequence.
-  const outputStart = Number(clip[1]) + Number(title[1]) - Number(clip[2]);
-  assert.equal(outputStart, 4410);
-  assert.equal(outputStart + Number(title[2]), 8820);
-  assert.match(xml, /<sequence duration="35280\/44100s"/);
+  const title = xml.match(/<title [^>]*offset="([^"]+)"[^>]*duration="([^"]+)"/);
+  const seconds = text => { const [n, d = '1'] = text.slice(0, -1).split('/'); return Number(n) / Number(d); };
+  assert.deepEqual(clip.slice(1).map(Number), [158760000, 52921, 35280]);
+  assert.ok(Math.abs(seconds(title[1]) - 3600 - 0.1) < 1e-9);
+  assert.equal(seconds(title[2]), 0.1);
+  assert.match(xml, /<sequence duration="24\/30s"/);
   assert.deepEqual(plan, before);
 });
 

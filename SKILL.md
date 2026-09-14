@@ -296,7 +296,9 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 >
 > 服务器启动时会把地址写进 `3_审核/server_url.txt`、进程号写进 `.review_server.pid`，方便排障。
 
-用户在网页中：播放片段确认 → 勾选/取消 → 点击「导出 FCPXML」→ 生成的 `*_cut.fcpxml` 拖入剪映或 Final Cut Pro 完成最终剪辑。工作台的播放跳段、波形、文字、标题预览和导出请求都引用同一次编译得到的整数 `compiledCutPlan`；服务端只校验并渲染，不重新计算剪辑语义、padding 或量化。
+用户在网页中：播放片段确认 → 勾选/取消 → 点击「导出 FCPXML」→ 生成的 `*_cut.fcpxml` 拖入剪映或 Final Cut Pro 完成最终剪辑。工作台的播放跳段、波形、文字、标题预览和导出请求都引用同一次编译得到的整数 `compiledCutPlan`；服务端不重新计算剪辑语义、padding 或音频量化。音频工程使用整帧 Primary Storyline gap，音频以 lane=-1、Title 以 lane=1 作为其连接子项；不得将 sample-grid 音频放回 Primary Storyline 或让 Title 继续嵌套在音频下。音频 start/duration 和实际 output ticks 不变，offset 仅换算到 gap 的本地时钟（3600 秒原点）。Title 最终 output 入出点取 sequence 的 30 fps 最近帧并约束在所属 keep 内，再换算到同一整帧 carrier；不修改 plan、审核时间或音频 ticks。无正长度整帧 Title 时明确拒绝带标题导出，不静默删字或越过剪口。carrier/sequence 向上取完整帧，尾部小于一帧的全零承载余量已接受，不继续消除；音频内容长度与项目承载长度须分开陈述。视频 renderer 保持原结构。
+
+Phase 4 connected-audio + Title 候选已获真实 FCP 验收：无帧边界警告，三段音频回写逐 sample 保持，Title 时间／文字保持且可编辑；带 Title 的 WAV 与无 Title 版本解码 PCM 相同。最终正式导出也已通过回写检查和人工冒烟，Phase 4 在已记录证据范围内闭环。不得把历史负字距异常视为已定位根因；复验未复现，不添加猜测性字距修正。
 
 PCM 恢复只撤销自动 PCM 静音删除理由，不抵消仍有效的词级内容删除或独立手工范围删除。PCM 标签可以撤销自己产生的手工删除标记；恢复范围在当前 invocation 内跨阈值/candidate 重算保留。撤销恢复只针对原决定，不按“最后操作”覆盖其它重叠决定；Title 跟随最终有效内容，learning 不从 PCM keep/cut 推断语言偏好。
 

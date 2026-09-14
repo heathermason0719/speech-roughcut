@@ -92,6 +92,16 @@ doctor 与正式转录共用配置解析：非空环境变量 → `VOLCENGINE_EN
 - 每种输入都先生成 48 kHz、单声道、64 kbps CBR 的一次性审核音频；审核时长只由解码 PCM sample count 决定。
 - FCPXML 引用原始资产而不是审核音频。音频按源采样网格量化，视频按 CFR 帧网格量化。
 
+时间审计按不同时间事实分别验收：packet/container 时长不替代有效解码 sample count；encoder delay/discard padding 不直接作为固定 offset。源与审核音频的首／中／尾残差需分别测量，误差随时长增长时不能用固定 offset 补偿。源网格末端由审核 samples 向外取整，可能比原生解码终点多出重采样与网格量化余量；不得仅因该差值修改时长或截断音频。
+
+Title 的工作台预览和 compiled plan 保留原时间：消除所属 keep 的累计输出平移后，每个入／出点的源网格误差不超过 `1 个源 tick + 0.5 个 review sample`（44.1 kHz 约 33.1 μs；30000/1001 fps 约 33.3771 ms）。音频 cut、内容长度和 CFR Title 到 XML 仍零 tick 差异；极短音频区间继续由浏览器和导出共同消费最终 keep/cut。
+
+音频 FCPXML 使用整帧 Primary Storyline `gap` 承载时间结构，真实音频以 `lane=-1` 连接在其下；`offset` 换算到 carrier 本地时钟，source start、duration 和实际 output 时间逐 sample 保持。`gap.start=3600s` 仅是 XML 本地坐标原点，不是媒体／ASR offset。carrier 与 sequence 时长向上取 30 fps 整帧，末尾小于一帧（33.333 ms）的全零承载余量已接受，不计入音频内容长度，不为消除它改变音频剪口。
+
+音频工程的 Title 以 `lane=1` 连接到同一个 carrier，不能继续挂在 sample-grid 音频片段下。Title output 入出点取最近帧（半帧向后），并约束在所属 keep 内的完整帧范围，再换算为 carrier offset；因此局部 offset、duration 与最终 output 都在 edit-frame grid。相对 compiled plan，每端通常至多移动半帧，边界约束时严格小于一帧；duration 差异严格小于两帧。review 预览总误差另加前述 source 网格误差。量化后没有正长度整帧 Title 时明确拒绝带标题导出，不静默删字、越过剪口或改动音频。CFR 视频仍沿用原来的片段／嵌套 Title 路径。
+
+Phase 4 的真实 MP3 三段候选已完成无警告、音频连续、Title 外观／可编辑性验收；回写逐 sample／frame 保留，带／不带 Title 的 WAV 解码 PCM 完全相同。旧的 Primary Storyline 音频帧化和插入一帧静音已由 connected audio 结构解决；历史负字距在独立复验中未复现，未添加字距补丁。FCP 与 ffmpeg 在该 MP3 的声学对齐仍有共同的 −1057 sample 差异，来源未定，不据此更改正式 offset，也不将局部真机结果扩张为所有格式的绝对声学等价。正式 renderer 生成物已完成最终 FCP 回写与人工冒烟确认：音频 sample、Title 帧位置／文字／样式保持，Phase 4 在上述已说明范围内闭环。
+
 ### 模式 A:剪口播(主线)
 
 直接说「**帮我剪这个口播音频 /path/to/audio.wav**」或提供视频路径,选 A。agent 会:
