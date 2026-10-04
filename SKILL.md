@@ -96,7 +96,7 @@ node "$SKILL_DIR/scripts/doctor.js"
 
 **AI 按报告分情况引导用户**（不要让用户自己看懂报告）：
 1. **缺系统依赖** → 把报告里对应平台的安装命令复制给用户（脚本已按 Win/Mac 给好），让其装完。
-2. **缺 / 占位 API Key** → 按以下流程引导用户（火山引擎·豆包语音服务，共 40h 免费额度）：
+2. **缺 / 占位 API Key** → 按以下流程引导用户（火山引擎·豆包语音服务，费用和赠送额度以账户实际权益为准）：
    1. 登录控制台 https://console.volcengine.com/speech/new/overview
    2. 左侧「语音识别」→ 开通「录音文件识别 1.0」的标准版或极速版；任一资源可用即可完成 setup，两个都可用时保留 auto 轮换
    3. 左侧「API Key 管理」→ 复制 API Key
@@ -152,7 +152,7 @@ bash "$SKILL_DIR/scripts/run_transcribe.sh" "$MEDIA_PATH" "$BASE_DIR"
 # 默认引擎: auto 读取 setup 能力；单资源固定，双资源交替
 #   - 单 X-Api-Key 认证，base64 直传，不依赖外部图床
 #   - 显式请求已知不可用的资源会及早拒绝；开通后重跑 doctor 更新能力
-#   - 限制: 音频 ≤ 2h、≤ 100MB
+#   - 上述时长/大小为当前 provider 路由准入阈值，不代表本项目已完成该时长生产验收
 # 可选引擎（只开了一个资源、或想固定用某个时加）:
 #   --flash        只用极速版（一次直出、最快）
 #   --v3-standard  只用标准版（异步 submit/query 轮询）
@@ -263,6 +263,33 @@ node "$SKILL_DIR/scripts/merge_selections.js" \
   "$BASE_DIR/2_分析/auto_selected.json"
 ```
 
+#### 5.7 为本条录音准备音频粗剪建议
+
+在原声、波形和转写上下文上判断停顿，不把 ASR／PCM 的显示框直接当删除范围。约 ≥0.7 秒的无 word 空档、咳嗽、喘气、长呼吸列为重点检查对象；更短停顿也按具体语流判断，保留自然句子的连贯与必要停连，过长的句内停顿可缩短。0.7 秒是用户听审后调整的检查重点，不是编译器硬阈值；不将一个能量／时长公式直接套成全片删除。若当前工具不能实际听音，应明确记录波形／转写判断的范围和听审缺口，不能把音量统计写成“已听审”。
+
+整句或半句话已被完整选择删除时，检查删后两侧保留语音之间形成的新接缝，把前后剩余空隙合起来评估。依据两侧语流缩短多余停顿，保留接声与必要停连，不机械地在两边各留一份完整停顿。需要额外删除的无 word 部分写为独立音频建议，并记录它对应的删句及上下文；不向保留 word 扩张、不把所有词级删除统一加 padding。后续用户改变词级决定时，已有音频建议仍可独立调整，不暗中增删。已验收的导出保留原样，新的判断只进入新的审核版本。
+
+将逐项判断写入 `BASE/2_分析/audio_suggestions.json`：
+
+```json
+{
+  "inputHash": "当前录音与转写的绑定 hash",
+  "suggestions": [{
+    "id": "pause-123456-234567",
+    "groupId": "long-pause",
+    "groupLabel": "长停顿",
+    "startSample": 123456,
+    "endSample": 234567,
+    "reason": "这处停顿打断语流，缩短中间空档并保留衔接",
+    "basis": "具体音频／转写观察和判断方法"
+  }]
+}
+```
+
+`inputHash` 用 `scripts/lib/audio_suggestion_input.js` 的 `audioSuggestionInputHash({words, mediaContext})` 生成；绑定源媒体身份、review clock 和完整 words。建议用整数 review samples，初始范围不得跨 word，身份、分组、理由、依据不能为空。允许短于 0.7 秒的建议、允许保留长停顿；不要求所有候选都删除。切点依据局部音频调整，记录实际边界，不引入新的全局 padding。相同问题按有意义的类型分组，供用户整类撤回；误判和单次修正不自动学习为偏好。
+
+检查建议在全片开头、中段、结尾及同类样本上的表现。不要只看片段数或总时长：若出现同类的系统性吞音／断句，先修正本批建议再交付，不能让用户逐条返修。保留已有人工词级决定；后续 word 选择变化不静默改写独立音频建议，可在工作台分别恢复。若没有充分依据形成某条建议，记录尚未判断，保留声音待听审。
+
 ### 步骤 6-7: 生成审核数据并启动服务器
 
 ```bash
@@ -273,7 +300,8 @@ node "$SKILL_DIR/scripts/generate_review.js" \
   "$BASE_DIR/1_转录/asr_breaks.json" \
   "$BASE_DIR/2_分析/auto_selected.json" \
   "$BASE_DIR/1_转录/media_context.json" \
-  "$BASE_DIR/3_审核"
+  "$BASE_DIR/3_审核" \
+  "$BASE_DIR/2_分析/audio_suggestions.json"
 
 # 7. 启动审核服务器
 #    serve_review.sh 会自动选端口、在【一个独立的 OS 终端窗口】里前台运行服务器、
@@ -296,15 +324,21 @@ bash "$SKILL_DIR/scripts/serve_review.sh" \
 >
 > 服务器启动时会把地址写进 `3_审核/server_url.txt`、进程号写进 `.review_server.pid`，方便排障。
 
-用户在网页中：播放片段确认 → 勾选/取消 → 点击「导出 FCPXML」→ 生成的 `*_cut.fcpxml` 拖入剪映或 Final Cut Pro 完成最终剪辑。工作台的播放跳段、波形、文字、标题预览和导出请求都引用同一次编译得到的整数 `compiledCutPlan`；服务端不重新计算剪辑语义、padding 或音频量化。音频工程使用整帧 Primary Storyline gap，音频以 lane=-1、Title 以 lane=1 作为其连接子项；不得将 sample-grid 音频放回 Primary Storyline 或让 Title 继续嵌套在音频下。音频 start/duration 和实际 output ticks 不变，offset 仅换算到 gap 的本地时钟（3600 秒原点）。Title 最终 output 入出点取 sequence 的 30 fps 最近帧并约束在所属 keep 内，再换算到同一整帧 carrier；不修改 plan、审核时间或音频 ticks。无正长度整帧 Title 时明确拒绝带标题导出，不静默删字或越过剪口。carrier/sequence 向上取完整帧，尾部小于一帧的全零承载余量已接受，不继续消除；音频内容长度与项目承载长度须分开陈述。视频 renderer 保持原结构。
+用户在网页中：播放片段确认 → 勾选/取消 → 点击「导出 FCPXML」→ 生成的 `*_cut.fcpxml` 拖入剪映或 Final Cut Pro 完成最终剪辑。工作台的播放跳段、波形、文字、标题预览和导出请求都引用同一次编译得到的整数 `compiledCutPlan`；新会话同时提交 editState，服务端使用冻结输入与同一编译器重放校验，必须与浏览器计划一致才导出；不使用另一套剪辑策略或量化方法。音频工程使用整帧 Primary Storyline gap，音频以 lane=-1、Title 以 lane=1 作为其连接子项；不得将 sample-grid 音频放回 Primary Storyline 或让 Title 继续嵌套在音频下。音频 start/duration 和实际 output ticks 不变，offset 仅换算到 gap 的本地时钟（3600 秒原点）。Title 最终 output 入出点取 sequence 的 30 fps 最近帧并约束在所属 keep 内，再换算到同一整帧 carrier；不修改 plan、审核时间或音频 ticks。无正长度整帧 Title 时明确拒绝带标题导出，不静默删字或越过剪口。carrier/sequence 向上取完整帧，尾部小于一帧的全零承载余量已接受，不继续消除；音频内容长度与项目承载长度须分开陈述。视频 renderer 保持原结构。
 
 Phase 4 connected-audio + Title 候选已获真实 FCP 验收：无帧边界警告，三段音频回写逐 sample 保持，Title 时间／文字保持且可编辑；带 Title 的 WAV 与无 Title 版本解码 PCM 相同。最终正式导出也已通过回写检查和人工冒烟，Phase 4 在已记录证据范围内闭环。不得把历史负字距异常视为已定位根因；复验未复现，不添加猜测性字距修正。
 
-PCM 恢复只撤销自动 PCM 静音删除理由，不抵消仍有效的词级内容删除或独立手工范围删除。PCM 标签可以撤销自己产生的手工删除标记；恢复范围在当前 invocation 内跨阈值/candidate 重算保留。撤销恢复只针对原决定，不按“最后操作”覆盖其它重叠决定；Title 跟随最终有效内容，learning 不从 PCM keep/cut 推断语言偏好。
+新生成审核数据使用 `narration-v1`，应用本条录音绑定的初始音频建议。工作台只执行冻结建议和用户编辑，不根据 ASR gap／PCM 能量重新扫描生成删除。未提供建议文件时列表为空并明确显示。每项建议可取消／再采用、修改边界，并支持整类或总开关；总开关保留已有单项和分组恢复决定。连续删词覆盖首词 start 至末词 end 及内部间隙，不向两侧保留词、外围间隙或文件头尾扩张。词级删除避开保留词；明确修改的音频范围优先于词级保护。不跨正长度 keep 合并，不额外吞掉短 keep。旧 `conservative-v1` 继续只执行词级与手工范围，不自动迁移。
 
-编辑先通过 state 转换与 plan 编译，再同步控件、波形、文字、标题和播放；失败保留上一次合法 state/plan，不消耗撤销记录。Cmd/Ctrl+Z 撤销，Cmd/Ctrl+Shift+Z 或 Ctrl+Y 重做，padding 控件也按恢复后的 state 同步。plan 更新清除旧播放 seek/preview 状态；播放检查短 cut 跨越。页面进入后台或离开时暂停媒体，返回前台不自动续播。
+正文保留连续文字，用轻量标记联动原声和局部波形。默认显示 ≥0.7 秒候选，短候选可展开，已编辑范围始终可见；显示边界按 `ceil(reviewSampleRate × 700 / 1000)` 换算，48 kHz 为 33,600 samples，44.1 kHz 为 30,870 samples，不控制删除。按真实区间重叠／相接形成导航区域，不根据视觉相邻猜测合并；导航区域不是删除选区，来源详情只读。波形定位和连续播放将对应正文滚入可见区域，仅滚动正文窗格，不抢焦点或改变播放时间；无 word 时显示最近上下文，不高亮虚构的当前词。
 
-每次导出使用独立 revision，完整写入后发布到 `3_审核/exports/<revision>/`。返回的 FCPXML、learning diff 路径和专属下载 URL 属于同一 revision；连续或并发请求互不覆盖，失败不会回滚其它成功版本。临时 I/O/下载错误允许当前合法 session 重试；身份、媒体、转录或冻结审核数据合同失效则 fail-closed。这不提供审核 autosave 或长期工程恢复。
+波形支持 Shift 拖选，也可输入秒数／分:秒或用播放头设置起止点；草稿、试听及候选显示不提交删除。明确删除才提交手工范围；调整自动建议边界沿用原建议 ID，不新增独立删除理由。独立范围可取消并参与 undo/redo，重叠范围各自保留；恢复词不取消范围删除。界面显示文字被音频范围部分或全部删除的事实，Title 跟随最终有效内容，范围操作不进入词级 learning。新界面撤下全局句头／句尾帧数及紧松控制。Space 在按钮、下拉框和时间字段获焦后仍控制播放／暂停；I／O 设起止点，Delete（含 Mac Backspace）应用有效选区，重复按键不连发。时间字段的 Delete／Backspace 保留数字编辑，IME 组合和系统修饰键不抢占。
+
+无版本历史状态继续按 `legacy-v1` 解释：PCM 恢复只撤销其自动删除和自身手工标记，保留词级及独立范围理由；恢复范围跨阈值保留。不将旧状态静默套用新策略。
+
+编辑先通过 state 转换与 plan 编译，再同步控件、波形、文字、标题和播放；失败保留上一次合法 state/plan，不消耗撤销记录。Cmd/Ctrl+Z 撤销，Cmd/Ctrl+Shift+Z 或 Ctrl+Y 重做，控件按恢复后的 state 同步。plan 更新清除旧播放 seek/preview 状态；播放检查短 cut 跨越。正常暂停取消 play 请求不算媒体故障。页面进入后台或离开时暂停媒体，返回前台不自动续播。
+
+每次导出使用独立 revision，完整写入后发布到 `3_审核/exports/<revision>/`。返回的 FCPXML、learning diff、`edit_snapshot.json` 路径和专属下载 URL 属于同一 revision；连续或并发请求互不覆盖，失败不会回滚其它成功版本。临时 I/O/下载错误允许当前合法 session 重试；身份、媒体、转录或冻结审核／PCM 数据合同失效则 fail-closed。新快照保存策略版本、完整编辑状态、原始音频建议及用户覆盖、编译输入与 inputHash、最终计划和 Title 开关，可用 `scripts/lib/edit_snapshot.js` 的 `replayEditSnapshot` 离线重放。旧页面只提供计划时快照标为 `plan-only`，不能声称恢复完整历史。这不提供审核 autosave 或长期工程恢复。 经核验输入身份与计划一致后，可将完整快照的编辑状态显式写入审核数据 `restoredEditState` 作为启动起点；保留词决定和范围 ID，不恢复旧 undo 历史。刷新会回到准备好的起点，新编辑需先导出留存。
 
 「可编辑标题字幕」默认勾选。开启时，服务器在导出阶段把已完成的字级转写转换成 Final Cut Pro 的 Basic Title：删除的词不进入字幕，字幕块不跨越剪辑断点；工作台已有短行保持不动，仅对超过 14 个中文字视觉宽度的长行拆分（ASCII 字符按半个中文字计宽，英文单词不从中间拆开）。关闭时不写 Title，保持原来的纯媒体 FCPXML 输出。
 
@@ -334,7 +368,15 @@ PCM 恢复只撤销自动 PCM 静音删除理由，不抵消仍有效的词级�
 
 ### 自动验证与用户真机闸门
 
-自动测试、浏览器合成夹具、XML 解析或本机 FCPXML DTD 校验只能证明实现合同，不能替代真实听感和 Final Cut Pro 导入。第一次真实 invocation 必须由用户分别检查 MP3、M4A、WAV、CFR 视频，并在开头、中段、结尾各选清晰词核对 ASR word、工作台文字、波形声学位置与实际声音；在此之前 `asrPresentationOffset` 只能保持 `pending_user_validation`。还需由用户在 Final Cut Pro 中实际导入音频/视频 FCPXML，核对切点、总时长、原始资产引用和可编辑 Basic Title。完成这些人工闸门前，不得宣称产品级最终 PASS。
+自动测试、浏览器夹具、XML 解析和 DTD 检查不能替代真实审核及 Final Cut Pro 验收。Phase 4 已完成其真实 MP3 三段验收；当前粗剪须以真实录音核验点击试听、自然语流、小停顿、任意声音删除与撤销，再完成完整听审和正式导出／FCP 回写。未完成这些人工项目时，不得宣称产品级最终 PASS；不以 clip 数量减少或总时长变化代替声音验收。
+
+本轮 48 kHz 实录已获用户使用验收。2026-09-16 的回写对应直接采用初始建议的 revision `5f11cf59-68d7-429c-b092-9c718d3d5d61`：112 段音频 source/output 逐 sample 相同，267 个 Title 的时间、文字、字体和位置保持，段间无额外 gap，约 5.104 毫秒承载尾余量符合约定。此前 107 段人工调整版与此版本分开记录，不混用证据。本轮未追加 FCP WAV 声学比较，也不据此更改任何正式 offset 状态。
+
+每个删除区间须能追溯到词级选择、带理由的音频建议或手工音频范围，禁止出现无对应决定的额外删音。当前录音重点核对 61.12–72 秒自然语流、01:18 附近短间隙，以及 13:48–13:49 附近咳嗽。咳嗽位置的用户证据不等于完整边界已经听审，必须结合原声复核所提交范围。接受可二次修改的局部瑕疵；同类错误系统性命中全片时须先处理。完整听审后再调整候选显示阈值。ASR/provider timing 按素材记录，不因其他测试通过就改写 context 中的 `pending_user_validation` 状态。
+
+视频保留工程支持和自动回归，未获用户真实生产验证；不作为本次音频封板条件。不把火山 provider 的时长/容量阈值写成项目生产承诺，不增加第二家真实 ASR。canonical transcript/fake-provider 和 learning diff 既有测试可继承；长期偏好保持显式学习和确认边界，不以“然后”等偏好成熟度阻塞本轮。
+
+最终能力声明应区分：允许的工程输入、自动测试、实际生产音频类型与时长、FCP 真机结果、当前 provider、已知限制及未验证项。尾部小于一帧的全零承载余量已接受，不继续消除。
 
 ### 模式 B: 转字幕
 

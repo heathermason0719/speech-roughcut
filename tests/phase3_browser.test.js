@@ -173,6 +173,7 @@ test('Phase 3 浏览器当前 plan、编辑事务与后台播放', {timeout:6000
 
   const dataPath = path.join(reviewDir, 'data.json');
   const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+  data.editPolicyVersion = 'legacy-v1'; // Exercise historical PCM/padding compatibility explicitly.
   data.mediaContext.offsets.playerPresentationOffset = { seconds: 0.05, status: 'verified' };
   fs.writeFileSync(dataPath, `${JSON.stringify(data, null, 2)}\n`);
   fs.writeFileSync(contextFile, `${JSON.stringify(data.mediaContext, null, 2)}\n`);

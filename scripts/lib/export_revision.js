@@ -22,10 +22,11 @@ function writeExportRevision(root, writeArtifacts, { fsModule = fs } = {}) {
   fsModule.mkdirSync(temporaryDirectory);
   try {
     const artifacts = writeArtifacts(temporaryDirectory, finalDirectory);
-    if (!artifacts || typeof artifacts.fcpxmlName !== 'string' || typeof artifacts.learningDiffName !== 'string') {
+    if (!artifacts || typeof artifacts.fcpxmlName !== 'string' || typeof artifacts.learningDiffName !== 'string'
+        || typeof artifacts.snapshotName !== 'string') {
       throw new Error('导出 revision 缺少完整产物');
     }
-    for (const name of [artifacts.fcpxmlName, artifacts.learningDiffName]) {
+    for (const name of [artifacts.fcpxmlName, artifacts.learningDiffName, artifacts.snapshotName]) {
       const file = path.join(temporaryDirectory, name);
       const handle = fsModule.openSync(file, 'r');
       try {
@@ -42,6 +43,7 @@ function writeExportRevision(root, writeArtifacts, { fsModule = fs } = {}) {
       directory: finalDirectory,
       outputPath: path.join(finalDirectory, artifacts.fcpxmlName),
       learningDiffPath: path.join(finalDirectory, artifacts.learningDiffName),
+      snapshotPath: path.join(finalDirectory, artifacts.snapshotName),
     };
   } catch (error) {
     fsModule.rmSync(temporaryDirectory, { recursive: true, force: true });

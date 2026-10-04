@@ -1,7 +1,7 @@
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory(require('./title_plan'));
-  else root.CompileEdit = factory(root.TitlePlan);
-})(typeof self !== 'undefined' ? self : this, function (TitlePlan) {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./title_plan'), require('./audio_suggestions'));
+  else root.CompileEdit = factory(root.TitlePlan, root.AudioSuggestions);
+})(typeof self !== 'undefined' ? self : this, function (TitlePlan, AudioSuggestions) {
   'use strict';
 
   function clamp(value, minimum, maximum) {
@@ -103,6 +103,19 @@
     return runs;
   }
 
+  function buildConservativeWordRuns(words, deletedWordIds) {
+    const runs = [];
+    let current = null;
+    for (const word of words) {
+      if (!deletedWordIds.has(word.id)) { current = null; continue; }
+      if (!current) {
+        current = { startSample: word.startSample, endSample: word.endSample };
+        runs.push(current);
+      } else current.endSample = Math.max(current.endSample, word.endSample);
+    }
+    return runs;
+  }
+
   function validateTimebase(timebase) {
     if (!timebase || !['audio-samples', 'video-frames'].includes(timebase.kind)) {
       throw new Error('timebase 无效');
@@ -193,7 +206,7 @@
     return plan;
   }
 
-  function compileEdit({ words = [], asrBreaks = [], detectedSilence = [], editState, mediaContext }) {
+  function compileEdit({ words = [], asrBreaks = [], detectedSilence = [], audioSuggestions = [], editState, mediaContext }) {
     if (!editState || !mediaContext || !mediaContext.review) throw new Error('compileEdit 缺少输入');
     const reviewSampleRate = Number(mediaContext.review.sampleRate);
     const durationSamples = Number(mediaContext.review.decodedSampleCount);
@@ -213,11 +226,20 @@
       wordById.set(word.id, word);
     }
     const policy = editState.policy || {};
+    const version = policy.version || 'legacy-v1';
+    if (!['legacy-v1', 'conservative-v1', 'narration-v1'].includes(version)) throw new Error('未知编辑策略');
+    const conservative = version !== 'legacy-v1';
+    const suggestedDeletes = version === 'narration-v1'
+      ? AudioSuggestions.resolveAudioSuggestions(
+        AudioSuggestions.validateAudioSuggestions(audioSuggestions, words, durationSamples), editState, durationSamples,
+      ).filter(item => item.enabled) : [];
     const paddingStartSamples = Math.max(0, Number(policy.silencePaddingStartSamples || 0));
     const paddingEndSamples = Math.max(0, Number(policy.silencePaddingEndSamples || 0));
     const currentDeleted = new Set(editState.currentDeletedWordIds || []);
     const restoredWordIds = new Set(editState.explicitlyRestoredWordIds || []);
-    const protectedWords = [...restoredWordIds].map(id => wordById.get(id)).filter(Boolean)
+    const protectedWords = (conservative
+      ? words.filter(word => !currentDeleted.has(word.id))
+      : [...restoredWordIds].map(id => wordById.get(id)).filter(Boolean))
       .map(word => ({ startSample: word.startSample, endSample: word.endSample }));
     const protectedSilenceRanges = normalizeIntervals(
       editState.explicitlyRestoredSilenceRanges || [],
@@ -226,7 +248,7 @@
     for (const id of currentDeleted) {
       if (!wordById.has(id)) throw new Error(`editState 引用未知 word: ${id}`);
     }
-    const wordDeletes = buildDeletedWordRuns(
+    const wordDeletes = conservative ? buildConservativeWordRuns(words, currentDeleted) : buildDeletedWordRuns(
       words,
       currentDeleted,
       durationSamples,
@@ -234,8 +256,18 @@
       paddingEndSamples,
     );
     const manualDeletes = (editState.manualDeleteRanges || []).map(range => ({ ...range }));
+    if (conservative) {
+      const ids = new Set();
+      for (const range of manualDeletes) {
+        if (!range.id || ids.has(range.id)
+            || !Number.isInteger(range.startSample) || !Number.isInteger(range.endSample)
+            || range.startSample < 0 || range.endSample > durationSamples
+            || range.endSample <= range.startSample) throw new Error('音频范围必须使用唯一 ID 和有效 sample 边界');
+        ids.add(range.id);
+      }
+    }
     const silenceDeletes = [];
-    if (policy.autoSilenceEnabled !== false) {
+    if (!conservative && policy.autoSilenceEnabled !== false) {
       for (const silence of detectedSilence) {
         if (!Number.isInteger(silence.startSample) || !Number.isInteger(silence.endSample)
             || silence.endSample <= silence.startSample || !silence.energy
@@ -251,14 +283,15 @@
     }
     const effectiveSilenceDeletes = subtractIntervals(silenceDeletes, protectedSilenceRanges);
     let cuts = normalizeIntervals(
-      [...wordDeletes, ...manualDeletes, ...effectiveSilenceDeletes],
+      [...(conservative ? subtractIntervals(wordDeletes, protectedWords) : wordDeletes),
+        ...manualDeletes, ...effectiveSilenceDeletes, ...suggestedDeletes],
       durationSamples,
-      Number(policy.mergeGapSamples || 0),
+      conservative ? 0 : Number(policy.mergeGapSamples || 0),
     );
-    cuts = subtractIntervals(cuts, protectedWords);
+    if (!conservative) cuts = subtractIntervals(cuts, protectedWords);
     let semanticKeeps = complement(cuts, 0, durationSamples);
     const minimumKeepSamples = Number(policy.minimumKeepSamples || 0);
-    if (minimumKeepSamples > 1) {
+    if (!conservative && minimumKeepSamples > 1) {
       const disposable = semanticKeeps.filter(keep => keep.endSample - keep.startSample < minimumKeepSamples
         && !protectedWords.some(protectedInterval => overlaps(keep, protectedInterval)));
       if (disposable.length) {

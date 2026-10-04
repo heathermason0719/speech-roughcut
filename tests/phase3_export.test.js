@@ -189,7 +189,8 @@ test('failed revision publication preserves a prior downloadable pair and change
   assert.throws(() => writeExportRevision(root, temporaryDirectory => {
     fs.writeFileSync(path.join(temporaryDirectory, 'other.fcpxml'), '<fcpxml />');
     fs.writeFileSync(path.join(temporaryDirectory, 'learning_diff.json'), '{}');
-    return { fcpxmlName: 'other.fcpxml', learningDiffName: 'learning_diff.json' };
+    fs.writeFileSync(path.join(temporaryDirectory, 'edit_snapshot.json'), '{}');
+    return { fcpxmlName: 'other.fcpxml', learningDiffName: 'learning_diff.json', snapshotName: 'edit_snapshot.json' };
   }, { fsModule: failingFs }), { code: 'EIO' });
   assert.equal(await fetch(`http://127.0.0.1:${port}${prior.body.downloadUrl}`).then(response => response.text()), priorXml);
   assert.equal(fs.readFileSync(prior.body.learningDiff, 'utf8'), priorLearning);

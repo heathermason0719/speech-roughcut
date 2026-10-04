@@ -10,6 +10,7 @@ const { buildFcpxml } = require('./lib/fcpxml');
 const { writeArtifactPair } = require('./lib/artifact_pair');
 const { revisionFile, writeExportRevision } = require('./lib/export_revision');
 const { buildLearningDiff, serializeLearningDiff } = require('./lib/learning_diff');
+const { buildEditSnapshot } = require('./lib/edit_snapshot');
 const { loadAndVerifyMediaContext } = require('./lib/media_manifest');
 const { verifyReviewIdentity } = require('./lib/invocation');
 
@@ -71,6 +72,9 @@ const SHARED_LIBRARIES = new Map([
   ['/lib/compile_edit.js', 'compile_edit.js'],
   ['/lib/subtitle_blocks.js', 'subtitle_blocks.js'],
   ['/lib/review_workbench.js', 'review_workbench.js'],
+  ['/lib/audio_range_editor.js', 'audio_range_editor.js'],
+  ['/lib/audio_suggestions.js', 'audio_suggestions.js'],
+  ['/lib/audio_suggestion_editor.js', 'audio_suggestion_editor.js'],
   ['/lib/review_media_capability.js', 'review_media_capability.js'],
 ]);
 
@@ -176,8 +180,16 @@ function sameSortedIds(left, right) {
 }
 
 let initialReviewData;
+let initialDetectedSilence;
+const SILENCE_FILE = path.join(REVIEW_ROOT, 'detected_silence.json');
+const readDetectedSilence = () => {
+  const value = fs.existsSync(SILENCE_FILE) ? JSON.parse(fs.readFileSync(SILENCE_FILE, 'utf8')) : [];
+  if (!Array.isArray(value)) throw new Error('detected_silence.json 必须是数组');
+  return value;
+};
 try {
   initialReviewData = readReviewData();
+  initialDetectedSilence = readDetectedSilence();
   verifyReviewIdentity(CONTEXT_FILE, initialContext, initialReviewData);
   if (!isDeepStrictEqual(initialReviewData.mediaContext, initialContext)) {
     throw new Error('data.json 与 media_context.json 不属于同一 invocation');
@@ -193,7 +205,8 @@ function verifyFrozenInvocation() {
     const currentReviewData = readReviewData();
     verifyReviewIdentity(CONTEXT_FILE, currentContext, currentReviewData);
     if (!isDeepStrictEqual(currentContext, initialContext)
-        || !isDeepStrictEqual(currentReviewData, initialReviewData)) {
+        || !isDeepStrictEqual(currentReviewData, initialReviewData)
+        || !isDeepStrictEqual(readDetectedSilence(), initialDetectedSilence)) {
       throw new Error('当前 invocation 的 media context 或审核数据已变化');
     }
     return { mediaContext: initialContext, reviewData: initialReviewData };
@@ -243,8 +256,8 @@ const server = http.createServer(async (request, response) => {
         ? Object.keys(payload)
         : [];
       if (!payload || Array.isArray(payload) || !payload.compiledCutPlan
-          || keys.some(key => !['compiledCutPlan', 'includeTitles'].includes(key))) {
-        throw new Error('导出请求必须只提供 compiledCutPlan 与 includeTitles');
+          || keys.some(key => !['compiledCutPlan', 'includeTitles', 'editState'].includes(key))) {
+        throw new Error('导出请求必须提供 compiledCutPlan、includeTitles，可附带 editState');
       }
       const { mediaContext: currentContext, reviewData } = verifyFrozenInvocation();
       if (!sameSortedIds(
@@ -253,6 +266,9 @@ const server = http.createServer(async (request, response) => {
       )) {
         throw new Error('compiledCutPlan 的 AI 初始词决定与 data.json 不一致');
       }
+      const snapshot = buildEditSnapshot({ reviewData, detectedSilence: initialDetectedSilence,
+        mediaContext: currentContext, editState: payload.editState,
+        compiledCutPlan: payload.compiledCutPlan, includeTitles: payload.includeTitles });
       let result;
       const exported = writeExportRevision(REVIEW_ROOT, (temporaryDirectory, finalDirectory) => {
         result = buildFcpxml({
@@ -269,11 +285,13 @@ const server = http.createServer(async (request, response) => {
           finalDeletedWordIds: payload.compiledCutPlan.wordDecisions.finalDeletedWordIds,
         });
         const learningDiffName = 'learning_diff.json';
+        const snapshotName = 'edit_snapshot.json';
         writeArtifactPair([
           { path: path.join(temporaryDirectory, path.basename(result.outputPath)), data: result.xml },
           { path: path.join(temporaryDirectory, learningDiffName), data: serializeLearningDiff(learningDiff) },
         ]);
-        return { fcpxmlName: path.basename(result.outputPath), learningDiffName };
+        fs.writeFileSync(path.join(temporaryDirectory, snapshotName), `${JSON.stringify(snapshot, null, 2)}\n`, { flag: 'wx' });
+        return { fcpxmlName: path.basename(result.outputPath), learningDiffName, snapshotName };
       });
       console.log(`✅ 导出 FCPXML: ${exported.outputPath} (${result.finalKeeps.length} 片段)`);
       jsonResponse(response, 200, {
@@ -282,6 +300,7 @@ const server = http.createServer(async (request, response) => {
         output: exported.outputPath,
         downloadUrl: `/api/download/fcpxml/${exported.revision}`,
         learningDiff: exported.learningDiffPath,
+        editSnapshot: exported.snapshotPath,
         segments: result.finalKeeps.length,
       });
     } catch (error) {

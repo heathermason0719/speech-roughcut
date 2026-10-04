@@ -156,6 +156,7 @@ test('headless Chrome 工作台共用唯一 plan，验证空隙点击、配色�
   ];
   const asrBreaks = [
     { id: 'asr-break-fixture', previousWordId: 'word-000000', nextWordId: 'word-000001', startSample: 9600, endSample: 36000 },
+    { id: 'asr-break-short', previousWordId: 'word-000001', nextWordId: 'word-000002', startSample: 40800, endSample: 62400 },
   ];
   fs.writeFileSync(wordsFile, JSON.stringify(words));
   fs.writeFileSync(breaksFile, JSON.stringify(asrBreaks));
@@ -173,6 +174,7 @@ test('headless Chrome 工作台共用唯一 plan，验证空隙点击、配色�
 
   const dataPath = path.join(reviewDir, 'data.json');
   const data = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+  data.editPolicyVersion = 'legacy-v1'; // Exercise historical PCM/padding compatibility explicitly.
   data.mediaContext.offsets.playerPresentationOffset = { seconds: 0.05, status: 'verified' };
   fs.writeFileSync(dataPath, `${JSON.stringify(data, null, 2)}\n`);
   fs.writeFileSync(contextFile, `${JSON.stringify(data.mediaContext, null, 2)}\n`);
@@ -220,6 +222,30 @@ test('headless Chrome 工作台共用唯一 plan，验证空隙点击、配色�
   assert.equal(initial.mediaElements, 1);
   assert.ok(Math.abs(initial.mapForward - 1.05) < 1e-9);
   assert.equal(initial.mapBack, 48000);
+
+  await t.test('正文无证据标签，长短停顿仍可展开且展开不改变剪辑', async () => {
+    const result = await chrome.evaluate(`(() => {
+      const before = JSON.stringify({ state: __reviewTest.getEditState(), plan: __reviewTest.getPlan() });
+      const inlineGaps = document.querySelectorAll('.paragraph-body .gap').length;
+      const pauseGroups = [...document.querySelectorAll('[data-pause-group]')];
+      const shortGroups = pauseGroups.filter(node => Number(node.dataset.endSample) - Number(node.dataset.startSample) < 24000);
+      const longGroups = pauseGroups.filter(node => Number(node.dataset.endSample) - Number(node.dataset.startSample) >= 24000);
+      const shortHidden = shortGroups.every(node => node.closest('.short-pauses') && !node.closest('.short-pauses').open);
+      const longShown = longGroups.every(node => !node.closest('.short-pauses'));
+      for (const node of document.querySelectorAll('.pause-list details')) node.querySelector('summary').click();
+      const after = JSON.stringify({ state: __reviewTest.getEditState(), plan: __reviewTest.getPlan() });
+      for (const node of document.querySelectorAll('.pause-list details')) node.open = false;
+      return { inlineGaps, groups: pauseGroups.length, shortCount: shortGroups.length,
+        shortHidden, longShown, before, after, words: [...document.querySelectorAll('.paragraph-body')].map(n => n.textContent).join('') };
+    })()`);
+    assert.equal(result.inlineGaps, 0, '诊断标签不应插在正文的词之间');
+    assert.ok(result.groups > 0);
+    assert.ok(result.shortCount > 0);
+    assert.equal(result.shortHidden, true);
+    assert.equal(result.longShown, true);
+    assert.equal(result.words, '开头删除结尾');
+    assert.equal(result.after, result.before);
+  });
 
   await t.test('PCM 自动删除通过页面点击恢复，再点击重切，阈值切换与撤销保持一致', async () => {
     const result = await chrome.evaluate(`(() => {

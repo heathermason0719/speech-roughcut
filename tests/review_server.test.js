@@ -85,7 +85,7 @@ function fixtureContract(root) {
     initialSuggestedWordDeletes: ['word-000001'],
     mediaContext,
   }, null, 2)}\n`);
-  return { source, contextFile, mediaContext, words, compiledCutPlan };
+  return { source, contextFile, mediaContext, words, compiledCutPlan, editState };
 }
 
 test('审核接口只接受当前 compiledCutPlan，并按开关序列化 output-time 标题', async (t) => {
@@ -239,4 +239,42 @@ test('服务端源码不保留旧语义编译与旧请求体职责', () => {
   ]) {
     assert.equal(source.includes(forbidden), false, forbidden);
   }
+});
+
+test('导出保存可重放快照，拒绝状态计划错配，旧页面明确只保存计划', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'roughcut-export-snapshot-'));
+  t.after(() => fs.rmSync(root, { recursive:true, force:true }));
+  const contract = fixtureContract(root);
+  fs.writeFileSync(path.join(root, 'detected_silence.json'), '[]');
+  const port = await freePort();
+  const child = spawn(process.execPath, [serverScript, String(port), contract.contextFile], {
+    cwd:root, stdio:['ignore','pipe','pipe'],
+  });
+  t.after(() => child.kill('SIGTERM'));
+  await waitUntilReady(child);
+  const editState = createEditState({ ...contract.editState, policy:{version:'conservative-v1'},
+    manualDeleteRanges:[{id:'cough',startSample:43200,endSample:48000}] });
+  const compiledCutPlan = compileEdit({ words:contract.words, asrBreaks:[], detectedSilence:[], editState, mediaContext:contract.mediaContext });
+  const good = await post(port, { editState, compiledCutPlan, includeTitles:false });
+  assert.equal(good.response.status,200,JSON.stringify(good.json));
+  const snapshot = JSON.parse(fs.readFileSync(good.json.editSnapshot,'utf8'));
+  assert.equal(snapshot.completeness,'complete');
+  assert.deepEqual(snapshot.editState.manualDeleteRanges,[{id:'cough',startSample:43200,endSample:48000}]);
+  const { replayEditSnapshot } = require('../scripts/lib/edit_snapshot');
+  assert.deepEqual(replayEditSnapshot(snapshot),compiledCutPlan);
+  const changed=structuredClone(snapshot); changed.inputs.words[0].endSample--;
+  assert.throws(()=>replayEditSnapshot(changed),/hash|指纹/);
+  const count=fs.readdirSync(path.join(root,'exports')).length;
+  const mismatch=await post(port, {editState: {...editState,manualDeleteRanges:[]},compiledCutPlan,includeTitles:false});
+  assert.equal(mismatch.response.status,400);
+  assert.equal(fs.readdirSync(path.join(root,'exports')).length,count);
+  const legacy=await post(port, {compiledCutPlan:contract.compiledCutPlan,includeTitles:false});
+  assert.equal(legacy.response.status,200,JSON.stringify(legacy.json));
+  const partial=JSON.parse(fs.readFileSync(legacy.json.editSnapshot,'utf8'));
+  assert.equal(partial.completeness,'plan-only'); assert.equal(partial.editState,null);
+  assert.throws(()=>replayEditSnapshot(partial),/完整编辑状态/);
+  fs.writeFileSync(path.join(root,'detected_silence.json'),'[{"id":"changed"}]');
+  const changedPcm=await post(port,{editState,compiledCutPlan,includeTitles:false});
+  assert.equal(changedPcm.response.status,409);
+  assert.equal(changedPcm.json.permanent,true);
 });

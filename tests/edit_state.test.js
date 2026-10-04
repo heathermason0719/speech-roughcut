@@ -10,6 +10,27 @@ try {
   // RED: editState 合同尚未实现。
 }
 
+test('显式恢复编辑起点保留人工决定和范围身份，没有恢复数据时仍用初选', () => {
+  const options={initialSuggestedWordDeletes:['a'],policy:{version:'narration-v1'}};
+  const saved=edit.createEditState({...options,currentDeletedWordIds:['b'],explicitlyRestoredWordIds:['a'],
+    manualDeleteRanges:[{id:'saved-range',startSample:10,endSample:20}],
+    disabledAudioSuggestionIds:['pause-1'],audioSuggestionRanges:[{id:'pause-2',startSample:30,endSample:40}]});
+  const before=JSON.stringify(saved);
+  assert.deepEqual(edit.createInitialEditState(options,undefined,[{id:'a'},{id:'b'}]),edit.createEditState(options));
+  assert.deepEqual(edit.createInitialEditState(options,saved,[{id:'a'},{id:'b'}]),saved);
+  assert.equal(JSON.stringify(saved),before);
+});
+
+test('恢复起点拒绝不同 AI 初选、不同策略和未知词，不能静默重置编辑', () => {
+  const options={initialSuggestedWordDeletes:['a'],policy:{version:'narration-v1'}};
+  const saved=edit.createEditState(options),words=[{id:'a'},{id:'b'}];
+  for(const invalid of [null,{}, {...saved,initialSuggestedWordDeletes:['b']},
+    {...saved,policy:{version:'conservative-v1'}}, {...saved,currentDeletedWordIds:['unknown']},
+    {...saved,explicitlyRestoredWordIds:['unknown']}]) {
+    assert.throws(()=>edit.createInitialEditState(options,invalid,words),/恢复/);
+  }
+});
+
 test('普通未删除词不能伪装成明确恢复，真实恢复与撤销恢复可区分', () => {
   assert.equal(typeof edit.createEditState, 'function');
   const initial = edit.createEditState({ initialSuggestedWordDeletes: ['w2'] });

@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>speech-roughcut · 审核稿</title>
   <script src="/lib/edit_state.js"></script>
+  <script src="/lib/audio_range_editor.js"></script>
+  <script src="/lib/audio_suggestions.js"></script>
+  <script src="/lib/audio_suggestion_editor.js"></script>
   <script src="/lib/title_plan.js"></script>
   <script src="/lib/compile_edit.js"></script>
   <script src="/lib/subtitle_blocks.js"></script>
@@ -928,7 +931,7 @@
         </div>
 
         <!-- Cut params card -->
-        <div class="card">
+        <div class="card" id="legacyCutControls">
           <div class="card-head">
             <span class="label">/ 静音剪辑</span>
           </div>
@@ -954,7 +957,18 @@
           </div>
         </div>
 
-        <!-- 快捷键已移到逐字稿标题栏右侧 -->
+        <div class="card" id="audioRangeEditor" hidden></div>
+        <div class="card" id="audioSuggestionEditor" hidden></div>
+        <div class="card" id="pauseInspector" hidden>
+          <div class="card-head"><span class="label">/ 停顿位置</span></div>
+          <div class="range-body">
+            <div class="range-actions"><button id="previousPause" type="button">上一处</button><button id="nextPause" type="button">下一处</button></div>
+            <label><input type="checkbox" id="showShortPauses"> 也显示短于 0.7 秒的候选</label>
+            <p id="pauseLocation" class="range-hint">点击正文中的细标记，定位原声与波形。</p>
+            <button id="auditionPause" type="button" disabled>▶ 试听附近原声</button>
+            <details><summary>查看检测来源</summary><div id="pauseEvidence"></div></details>
+          </div>
+        </div>
 
       </div>
     </div>

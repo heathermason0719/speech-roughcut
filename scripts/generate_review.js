@@ -6,6 +6,7 @@ const path = require('node:path');
 const { loadAndVerifyMediaContext } = require('./lib/media_manifest');
 const { analyzeReviewAudio } = require('./lib/review_audio_analysis');
 const { acquireReviewWriter, verifyTranscript } = require('./lib/invocation');
+const { readAudioSuggestionInput } = require('./lib/audio_suggestion_input');
 
 const WORKBENCH_SILENCE_THRESHOLDS = [-30, -35, -40, -45];
 
@@ -22,6 +23,7 @@ async function generateReview({
   autoSelectedFile,
   contextFile,
   outDir,
+  audioSuggestionsFile,
 }) {
   const resolvedOutDir = path.resolve(outDir);
   const words = readArray(wordsFile, 'words');
@@ -40,6 +42,9 @@ async function generateReview({
   }
   const mediaContext = loadAndVerifyMediaContext(contextFile);
   verifyTranscript(contextFile, mediaContext, wordsFile, asrBreaksFile);
+  const audioSuggestions = audioSuggestionsFile ? readAudioSuggestionInput(
+    JSON.parse(fs.readFileSync(audioSuggestionsFile, 'utf8')), { words, mediaContext },
+  ) : [];
   const releaseWriter = acquireReviewWriter(contextFile, mediaContext, resolvedOutDir);
   try {
     fs.mkdirSync(resolvedOutDir, { recursive: true });
@@ -52,6 +57,8 @@ async function generateReview({
       throw new Error('审核分析 sample count 与 media context 不一致');
     }
     const data = {
+      editPolicyVersion: 'narration-v1',
+      audioSuggestions,
       ...(mediaContext.invocationId ? { invocationId: mediaContext.invocationId } : {}),
       words,
       asrBreaks,
@@ -75,6 +82,7 @@ async function generateReview({
     console.log(`真实 words: ${words.length}`);
     console.log(`ASR breaks: ${asrBreaks.length}`);
     console.log(`AI 语言初选: ${initialSuggestedWordDeletes.length}`);
+    console.log(`可调整音频建议: ${audioSuggestions.length} 段`);
     console.log(`📈 sample-domain peaks: ${analysis.peaks.values.length} buckets`);
     console.log(`🔕 PCM 静音证据: ${analysis.detectedSilence.length} 段`);
     console.log('✅ 审核数据准备完成');
@@ -85,12 +93,12 @@ async function generateReview({
 }
 
 if (require.main === module) {
-  const [wordsFile, asrBreaksFile, autoSelectedFile, contextFile, outDir = '.'] = process.argv.slice(2);
+  const [wordsFile, asrBreaksFile, autoSelectedFile, contextFile, outDir = '.', audioSuggestionsFile] = process.argv.slice(2);
   if (!wordsFile || !asrBreaksFile || !autoSelectedFile || !contextFile) {
-    console.error('用法: node generate_review.js <subtitles_words.json> <asr_breaks.json> <auto_selected.json> <media_context.json> [输出目录]');
+    console.error('用法: node generate_review.js <subtitles_words.json> <asr_breaks.json> <auto_selected.json> <media_context.json> [输出目录] [audio_suggestions.json]');
     process.exit(1);
   }
-  generateReview({ wordsFile, asrBreaksFile, autoSelectedFile, contextFile, outDir }).catch(error => {
+  generateReview({ wordsFile, asrBreaksFile, autoSelectedFile, contextFile, outDir, audioSuggestionsFile }).catch(error => {
     console.error(`❌ 生成审核数据失败: ${error.message}`);
     process.exitCode = 1;
   });

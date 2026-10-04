@@ -113,6 +113,17 @@ async function captureSnapshot(checkoutRoot, source, outputRoot) {
 function assertSnapshotTimeEquivalent(current, baseline) {
   const normalized = structuredClone(current);
   const expected = structuredClone(baseline);
+  // New sessions opt into the conservative policy; these historical scenarios
+  // intentionally exercise legacy decisions. Only remove the new version labels,
+  // keeping every policy number, compiled interval and media clock in the equality.
+  assert.equal(normalized.data.editPolicyVersion, 'narration-v1');
+  assert.deepEqual(normalized.data.audioSuggestions, []);
+  delete normalized.data.audioSuggestions;
+  delete normalized.data.editPolicyVersion;
+  for (const scenario of Object.values(normalized.scenarios)) {
+    assert.equal(scenario.editState.policy.version, 'legacy-v1');
+    delete scenario.editState.policy.version;
+  }
   if (current.data.mediaContext.timebase.kind === 'audio-samples') {
     const attrs = text => Object.fromEntries([...text.matchAll(/([\w-]+)="([^"]*)"/g)].map(m => [m[1], m[2]]));
     const fraction = text => text.slice(0, -1).split('/').map(BigInt);
