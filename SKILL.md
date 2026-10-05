@@ -168,6 +168,8 @@ canonical `transcript.json` 的 version 1 只包含 `words` 与 `asrBreaks`，�
 
 独立 `volcengine_*_transcribe.sh <local_file_or_url> [output_dir]` 工具同样保存任务并拒绝覆盖既有结果；恢复需加 `--resume` 且保持原输入、目录和引擎。正式 BASE 必须使用统一入口恢复。这些工具只发布 raw，完整转录验收以正式入口为准。
 
+需要零 ASR 的独立再审核时，使用 `node scripts/reuse_transcript.js <已有成功 BASE> <全新 BASE>`。入口先验证原媒体、审核资产及 canonical／words／breaks 归属，再复制审核音频原 bytes，经现有所有者和原子发布流程建立新 invocation；不复制编辑、分析或 provider 任务。`reuse_identity.json` 保存来源身份与内容 hash。源媒体引用、word IDs、sample clock、offset 和验证状态保持，复制资产的路径／文件指纹重新绑定。该入口不加载凭证、doctor 或 ASR；失败不能回退识别，失败的复用 invocation 也不能通过转录 resume 变成网络请求。
+
 审核数据只生成到当前 `BASE/3_审核`，同一 invocation 的生成操作互斥；正常完成释放 `.review-writer.json`，异常退出可能保留锁并明确拒绝后续生成，不自动抢锁。审核服务校验 cwd、context、转录及 data 的归属，并在整个服务生命周期持有审核目录的 OS 排他锁；第二服务拒绝启动，所有者进程退出后锁自动释放，不另建项目身份。
 
 进入人工审核前，浏览器须通过媒体加载、画面解码（视频）及定位探测。纯音频检查统一 MP3；当前视频审核只对 H.264/AAC 组合尝试准入，其他编码明确拒绝。不支持、超时或后续解码错误会锁住审核与导出；该探测不证明全片播放、实际可听性或额外音画同步，不提供通用代理或自动转码。
@@ -268,6 +270,35 @@ node "$SKILL_DIR/scripts/merge_selections.js" \
 在原声、波形和转写上下文上判断停顿，不把 ASR／PCM 的显示框直接当删除范围。约 ≥0.7 秒的无 word 空档、咳嗽、喘气、长呼吸列为重点检查对象；更短停顿也按具体语流判断，保留自然句子的连贯与必要停连，过长的句内停顿可缩短。0.7 秒是用户听审后调整的检查重点，不是编译器硬阈值；不将一个能量／时长公式直接套成全片删除。若当前工具不能实际听音，应明确记录波形／转写判断的范围和听审缺口，不能把音量统计写成“已听审”。
 
 整句或半句话已被完整选择删除时，检查删后两侧保留语音之间形成的新接缝，把前后剩余空隙合起来评估。依据两侧语流缩短多余停顿，保留接声与必要停连，不机械地在两边各留一份完整停顿。需要额外删除的无 word 部分写为独立音频建议，并记录它对应的删句及上下文；不向保留 word 扩张、不把所有词级删除统一加 padding。后续用户改变词级决定时，已有音频建议仍可独立调整，不暗中增删。已验收的导出保留原样，新的判断只进入新的审核版本。
+
+弃用重录使用整段接缝准备：在下面的建议 envelope 中可增加 `seamPreparation`。它绑定完整初选，逐条写明连续删词 run、紧邻的保留锚点及依附两端的停顿长度；生成器确定地补删两侧无 word 部分，并与词级删除精确相接。不要固定内收删除边界或从低能量区中央截取。PCM 仅作为判断证据，不决定删除。示例中的 sample 数必须由本条录音判断，不能作为默认参数套全片。
+
+`seamPreparation.inputHash` 使用 `scripts/lib/audio_suggestion_input.js` 的 `seamInputHash({words,mediaContext,initialSuggestedWordDeletes})`；除完整初选外，还绑定媒体上下文中的审核资产、clock、offset 与验证状态，不能将另一个初选或媒体上下文的接缝判断移用。
+
+```json
+{
+  "version": 1,
+  "initialDeletedWordIds": ["word-delete-1", "word-delete-2"],
+  "inputHash": "当前媒体、完整 words 和初选的 seamInputHash",
+  "decisions": [{
+    "id": "retake-1",
+    "deletedWordIds": ["word-delete-1", "word-delete-2"],
+    "leftWordId": "word-left",
+    "rightWordId": "word-right",
+    "keepLeftSamples": 4800,
+    "keepRightSamples": 9600,
+    "retainedSounds": [],
+    "status": "resolved",
+    "hearingStatus": "pending",
+    "reason": "前一段为弃用重录，停顿依附两侧保留语音",
+    "basis": "具体上下文和声音证据；尚未完成用户听审"
+  }]
+}
+```
+
+文件头／尾锚点用 `null`。`retainedSounds` 可记录 `{startSample,endSample,status,reason}`：`intentional` 表示明确保留独立声音，`pending` 表示无法判断而保留待听。整条接缝 `status: "pending"` 时不生成补删。`resolved` 只表示边界决定完整，不表示声音验收通过；`hearingStatus` 只有完成听审才可写 `heard`。非法输入、锚点、越界停顿或跨 word 的独立声音明确拒绝。
+
+接缝派生建议不重复放入 envelope 的 `suggestions` 数组；该数组继续存放其他独立建议。生成后的 `data.json` 和完整快照保存原决定及最终建议。工作台“接缝复核”检查所有夹在删除块之间、没有保留词的片段，不设时长门槛，也不补删；已解决接缝中未声明孤岛会使初始准备失败。编辑词、建议或手工范围后只提示复核；撤销恢复原决定。导出快照可离线审计：`node scripts/audit_seams.js <edit_snapshot.json>`。旧数据没有接缝字段时保持原计划。
 
 将逐项判断写入 `BASE/2_分析/audio_suggestions.json`：
 

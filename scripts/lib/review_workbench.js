@@ -115,6 +115,7 @@
     let words = [];
     let asrBreaks = [];
     let audioSuggestions = [];
+    let seamPreparation = null;
     let allDetectedSilence = [];
     let detectedSilence = [];
     let peaksData = null;
@@ -286,6 +287,7 @@
         refreshSelectionStyles();
         if (rangeEditor) rangeEditor.refresh();
         if (suggestionEditor) suggestionEditor.refresh();
+        renderSeamAudit();
         drawWave();
         document.getElementById('tl-total').textContent = formatSample(durationSamples());
         document.getElementById('tl-final').textContent = formatSeconds(currentOutputSeconds());
@@ -314,6 +316,37 @@
     }
 
     function refreshPlan() { return commitState(editState, false, true); }
+
+    function renderSeamAudit() {
+      if (!root.SeamPreparation || !compiledCutPlan) return;
+      const audit = root.SeamPreparation.auditSeams({plan:compiledCutPlan,words,editState,
+        preparation:seamPreparation,audioSuggestions});
+      api.getSeamAudit = () => clone(audit);
+      const panel = document.getElementById('seamAudit');
+      if (!panel) return;
+      panel.replaceChildren(); panel.hidden = false;
+      const details = document.createElement('details'), summary = document.createElement('summary');
+      const changed = audit.seamReviews.filter(s=>s.status==='user-edited');
+      summary.textContent = `接缝复核 · ${audit.fragments.length} 处独立片段 · ${changed.length} 处编辑后需复核`;
+      details.append(summary);
+      const note = document.createElement('p'); note.textContent = '复核只报告声音片段，不改变剪辑。试听原声后可调整已有决定；剪后效果用播放器试听。'; details.append(note);
+      const labels = {'intentional':'明确保留','pending':'待听','user-edited':'编辑后需复核','preparation-failed':'准备失败','resolved':'接缝待听审'};
+      const preciseTime = sample => {
+        const seconds = sample / sampleRate();
+        return `${String(Math.floor(seconds / 60)).padStart(2,'0')}:${(seconds % 60).toFixed(3).padStart(6,'0')}`;
+      };
+      const add = (item, kind) => {
+        const row = document.createElement('p'); row.dataset.auditStatus = item.status;
+        row.append(`${preciseTime(item.startSample)}–${preciseTime(item.endSample)} ${kind} · ${labels[item.status]} · ${item.reason} `);
+        for (const [label, action] of [['定位',()=>locateAudioRange(item)],['原声',()=>{locateAudioRange(item);beginPreview(item,true);}]]) {
+          const button = document.createElement('button'); button.type='button';button.textContent=label;button.addEventListener('click',action);row.append(button);
+        }
+        details.append(row);
+      };
+      audit.fragments.forEach(item=>add(item,'独立片段'));
+      audit.seamReviews.forEach(item=>add(item,'接缝'));
+      panel.append(details);
+    }
 
     function dispatch(action, record = true) {
       if (api.error) return null;
@@ -374,7 +407,10 @@
       pendingSeek = { cutId: cut.id, targetSample: cut.reviewEndSample };
       previousPlaybackSample = cut.reviewEndSample;
       seekWrites[cut.id] = (seekWrites[cut.id] || 0) + 1;
-      if (performSeek) player.currentTime = reviewSampleToPlayerSeconds(cut.reviewEndSample);
+      if (performSeek) {
+        if (cut.reviewEndSample >= durationSamples()) player.pause();
+        player.currentTime = reviewSampleToPlayerSeconds(cut.reviewEndSample);
+      }
       return cut.reviewEndSample;
     }
 
@@ -1384,6 +1420,7 @@
     }
 
     function initControls() {
+      player.loop = false;
       const pauseForBackground = () => {
         if (!document.hidden) return;
         player.pause();
@@ -1513,6 +1550,12 @@
         words = data.words;
         asrBreaks = data.asrBreaks;
         audioSuggestions = data.audioSuggestions || [];
+        seamPreparation = data.seamPreparation || null;
+        if (seamPreparation) {
+          if (!root.SeamPreparation) throw new Error('接缝复核模块未加载');
+          root.SeamPreparation.validateFrozenPreparation(seamPreparation, words, data.initialSuggestedWordDeletes,
+            data.mediaContext.review.decodedSampleCount, audioSuggestions);
+        }
         allDetectedSilence = silence;
         peaksData = peaks;
         mediaContext = data.mediaContext;

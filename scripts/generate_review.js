@@ -7,6 +7,9 @@ const { loadAndVerifyMediaContext } = require('./lib/media_manifest');
 const { analyzeReviewAudio } = require('./lib/review_audio_analysis');
 const { acquireReviewWriter, verifyTranscript } = require('./lib/invocation');
 const { readAudioSuggestionInput } = require('./lib/audio_suggestion_input');
+const { auditSeams } = require('./lib/seam_preparation');
+const { compileEdit } = require('./lib/compile_edit');
+const { createEditState } = require('./lib/edit_state');
 
 const WORKBENCH_SILENCE_THRESHOLDS = [-30, -35, -40, -45];
 
@@ -42,9 +45,16 @@ async function generateReview({
   }
   const mediaContext = loadAndVerifyMediaContext(contextFile);
   verifyTranscript(contextFile, mediaContext, wordsFile, asrBreaksFile);
-  const audioSuggestions = audioSuggestionsFile ? readAudioSuggestionInput(
-    JSON.parse(fs.readFileSync(audioSuggestionsFile, 'utf8')), { words, mediaContext },
-  ) : [];
+  const envelope = audioSuggestionsFile ? JSON.parse(fs.readFileSync(audioSuggestionsFile, 'utf8')) : null;
+  const audioSuggestions = envelope ? readAudioSuggestionInput(envelope, { words, mediaContext, initialSuggestedWordDeletes }) : [];
+  const seamPreparation = envelope?.seamPreparation;
+  if (seamPreparation) {
+    const editState = createEditState({initialSuggestedWordDeletes,currentDeletedWordIds:initialSuggestedWordDeletes,policy:{version:'narration-v1'}});
+    const plan = compileEdit({words,mediaContext,audioSuggestions,editState});
+    if (auditSeams({plan,words,audioSuggestions,editState,preparation:seamPreparation}).preparationFailures.length) {
+      throw new Error('已解决接缝仍有未声明孤岛，接缝准备失败');
+    }
+  }
   const releaseWriter = acquireReviewWriter(contextFile, mediaContext, resolvedOutDir);
   try {
     fs.mkdirSync(resolvedOutDir, { recursive: true });
@@ -59,6 +69,7 @@ async function generateReview({
     const data = {
       editPolicyVersion: 'narration-v1',
       audioSuggestions,
+      ...(seamPreparation ? { seamPreparation } : {}),
       ...(mediaContext.invocationId ? { invocationId: mediaContext.invocationId } : {}),
       words,
       asrBreaks,

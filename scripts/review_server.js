@@ -11,6 +11,8 @@ const { writeArtifactPair } = require('./lib/artifact_pair');
 const { revisionFile, writeExportRevision } = require('./lib/export_revision');
 const { buildLearningDiff, serializeLearningDiff } = require('./lib/learning_diff');
 const { buildEditSnapshot } = require('./lib/edit_snapshot');
+const { validateFrozenPreparation } = require('./lib/seam_preparation');
+const { validateSeamInputBinding } = require('./lib/audio_suggestion_input');
 const { loadAndVerifyMediaContext } = require('./lib/media_manifest');
 const { verifyReviewIdentity } = require('./lib/invocation');
 
@@ -74,6 +76,7 @@ const SHARED_LIBRARIES = new Map([
   ['/lib/review_workbench.js', 'review_workbench.js'],
   ['/lib/audio_range_editor.js', 'audio_range_editor.js'],
   ['/lib/audio_suggestions.js', 'audio_suggestions.js'],
+  ['/lib/seam_preparation.js', 'seam_preparation.js'],
   ['/lib/audio_suggestion_editor.js', 'audio_suggestion_editor.js'],
   ['/lib/review_media_capability.js', 'review_media_capability.js'],
 ]);
@@ -170,6 +173,11 @@ function readReviewData() {
   if (!data || typeof data !== 'object' || Array.isArray(data)
       || !Array.isArray(data.words) || !Array.isArray(data.initialSuggestedWordDeletes)) {
     throw new Error('data.json 不是当前审核数据格式');
+  }
+  if (data.seamPreparation) {
+    validateSeamInputBinding(data.seamPreparation,data);
+    validateFrozenPreparation(data.seamPreparation, data.words,
+      data.initialSuggestedWordDeletes, data.mediaContext.review.decodedSampleCount, data.audioSuggestions);
   }
   return data;
 }

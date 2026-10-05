@@ -119,6 +119,39 @@ test('自动粗剪工作台：单条／分组恢复、边界修改、撤销及�
     assert.equal(r.status,200,JSON.stringify(r.body));
     assert.deepEqual(replayEditSnapshot(JSON.parse(fs.readFileSync(path.join(review,'exports',r.body.revision,'edit_snapshot.json')))),saved.plan);
   });
+  await t.test('跳过尾部删除段立即停止，停在结尾且不自动重新播放',async()=>{
+    const before=await chrome.evaluate('JSON.stringify(__reviewTest.getEditState())');
+    const result=await chrome.evaluate(`(async()=>{
+      const player=document.getElementById('player');
+      __reviewTest.dispatch({type:'ADD_MANUAL_DELETE_RANGE',range:{id:'playback-tail',startSample:288000,endSample:384000}});
+      __reviewTest.seekReviewSample(264000);
+      await new Promise(resolve=>player.addEventListener('seeked',resolve,{once:true}));
+      await player.play();
+      const target=__reviewTest.processPlaybackSample(288001);
+      const stoppedImmediately=player.paused;
+      await new Promise(resolve=>setTimeout(resolve,250));
+      return {target,stoppedImmediately,paused:player.paused,seconds:player.currentTime,
+        playLabel:document.getElementById('playBtn').textContent,consistent:__reviewTest.getConsumerConsistency().sameObject};
+    })()`);
+    assert.equal(result.target,384000);
+    assert.equal(result.stoppedImmediately,true);
+    assert.equal(result.paused,true);
+    assert.ok(result.seconds>7.9 && result.seconds<=8.01,JSON.stringify(result));
+    assert.equal(result.playLabel,'▶ 播放');
+    assert.equal(result.consistent,true);
+    const resumed=await chrome.evaluate(`(async()=>{
+      const player=document.getElementById('player');
+      __reviewTest.undo();
+      __reviewTest.seekReviewSample(264000);
+      await new Promise(resolve=>player.addEventListener('seeked',resolve,{once:true}));
+      await player.play();
+      const playing=!player.paused;
+      player.pause();
+      return {playing,state:JSON.stringify(__reviewTest.getEditState())};
+    })()`);
+    assert.equal(resumed.playing,true);assert.equal(resumed.state,before);
+  });
+
 });
 
 test('听审反馈：0.7 秒候选与波形／正文联动不改变声音', {timeout:60000}, async t=>{

@@ -71,6 +71,12 @@ async function main(args) {
     if (configured.status !== 0) throw new Error(configured.stderr.trim() || '配置引擎选择失败');
     engine = configured.stdout.trim();
   }
+  if (options.resume) {
+    const prior = JSON.parse(fs.readFileSync(path.join(base,'invocation.json'),'utf8'));
+    if (prior.mode === 'offline-transcript-reuse' && prior.state !== 'complete') {
+      throw new Error('离线复用失败不能恢复为 ASR 请求；请核验本地来源并使用新的复用 BASE');
+    }
+  }
   const claim = options.resume ? resumeInvocation(base) : claimInvocation(base, options.source);
   const dir = claim.record.transcribeDir;
   const env = { ...process.env, PYTHONUTF8: '1',

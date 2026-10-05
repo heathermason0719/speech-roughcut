@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 const { isDeepStrictEqual } = require('node:util');
 const { createEditState } = require('./edit_state');
 const { compileEdit, validateCompiledCutPlan } = require('./compile_edit');
+const { validateFrozenPreparation } = require('./seam_preparation');
+const { validateSeamInputBinding } = require('./audio_suggestion_input');
 
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -26,7 +28,13 @@ function buildEditSnapshot({ reviewData, detectedSilence, mediaContext, editStat
     // Keep all frozen evidence in plan-only exports; a full snapshot records the exact compiler input.
     detectedSilence: state ? detectedSilence.filter(item => Number(item.thresholdDb) === Number(state.policy.silenceThresholdDb)) : detectedSilence,
     ...(reviewData.audioSuggestions ? { audioSuggestions: reviewData.audioSuggestions } : {}),
+    ...(reviewData.seamPreparation ? { seamPreparation: reviewData.seamPreparation } : {}),
   });
+  if (inputs.seamPreparation) {
+    validateSeamInputBinding(inputs.seamPreparation,{...inputs,initialSuggestedWordDeletes:reviewData.initialSuggestedWordDeletes});
+    validateFrozenPreparation(inputs.seamPreparation, inputs.words,
+      reviewData.initialSuggestedWordDeletes, mediaContext.review.decodedSampleCount, inputs.audioSuggestions);
+  }
   if (state && !isDeepStrictEqual(compileEdit({ ...inputs, editState: state }), compiledCutPlan)) {
     throw new Error('editState 重放与 compiledCutPlan 不一致，未导出');
   }
@@ -45,6 +53,11 @@ function replayEditSnapshot(snapshot) {
   if (snapshot.completeness !== 'complete' || !snapshot.editState) throw new Error('此快照缺少完整编辑状态，不能重放决定');
   if (digest(snapshot.inputs) !== snapshot.inputHash) throw new Error('编辑快照输入 hash 不一致');
   const state = createEditState(snapshot.editState);
+  if (snapshot.inputs.seamPreparation) {
+    validateSeamInputBinding(snapshot.inputs.seamPreparation,{...snapshot.inputs,initialSuggestedWordDeletes:state.initialSuggestedWordDeletes});
+    validateFrozenPreparation(snapshot.inputs.seamPreparation, snapshot.inputs.words,
+      state.initialSuggestedWordDeletes, snapshot.inputs.mediaContext.review.decodedSampleCount, snapshot.inputs.audioSuggestions);
+  }
   if (snapshot.policyVersion !== state.policy.version) throw new Error('快照策略版本不一致');
   const plan = compileEdit({ ...snapshot.inputs, editState: state });
   if (!isDeepStrictEqual(plan, snapshot.compiledCutPlan)) throw new Error('快照重放计划不一致');
