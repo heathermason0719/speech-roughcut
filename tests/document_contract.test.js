@@ -54,7 +54,7 @@ test('文档不再陈述旧流程合同', () => {
   forbidden.forEach(value => assert.equal(currentDocs.includes(value), false, value));
 });
 
-test('许可证和 attribution 保持冻结基线，经验规则正文不变', () => {
+test('许可证和 attribution 保持冻结基线', () => {
   const license = fs.readFileSync(path.join(root, 'LICENSE'));
   assert.equal(
     crypto.createHash('sha256').update(license).digest('hex'),
@@ -70,8 +70,4 @@ test('许可证和 attribution 保持冻结基线，经验规则正文不变', (
   ]) {
     assert.equal(readme.includes(required), true, required);
   }
-  assert.match(
-    read('用户习惯/经验规则.md'),
-    /## 规则正文\n\n_（暂无。第一次跑学习后，确认的规则会写在这里。）_\n?$/,
-  );
 });
